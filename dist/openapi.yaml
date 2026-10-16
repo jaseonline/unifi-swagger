@@ -1,0 +1,1045 @@
+openapi: 3.1.0
+info:
+  title: UniFi API - matilda.network (Local Console and Site Manager Cloud)
+  version: 1.0.0
+  summary: Merged, cleansed reference for the UniFi Cloud Key Gen2 Plus console and UniFi Site Manager.
+  description: |
+    Merged from three Postman exports (UniFi APIController, UniFi Network API, UniFi CloudKey API).
+
+    **Sections**
+    - **Local** (tag `Local`): console at `https://{host}` (default `192.168.1.2`, self-signed certificate).
+      - *Official Integration API* under `/proxy/network/integration/v1` (API key).
+      - *Controller API (undocumented, community-reverse-engineered)* under `/proxy/network/api/s/{site}` and
+        `/proxy/network/v2/api/site/{site}` (session cookie plus CSRF token). May change between Network Application releases.
+    - **Cloud** (tag `Cloud`): UniFi Site Manager at `https://api.ui.com` (API key from unifi.ui.com).
+
+    **Conventions**
+    - Operations that change state carry `x-destructive: true`. Per the project change-management rule, firewall, VLAN and
+      tunnel changes need a written plan and approval before use.
+    - `{siteId}` is the site UUID (Integration API). `{site}` is the site name, normally `default` (controller API).
+    - All examples are placeholders. No real MAC addresses, keys, tokens or public IPs are included.
+
+    **Removed during cleansing** (not applicable to this network): hotspot vouchers (guest WLAN uses a passphrase), IPsec/site VPN
+    creation, static routes, LTE backup, dynamic DNS, DPI and SSL inspection (both off), legacy firewall rules (migrated to the
+    zone-based firewall), reboot/power-off, Postman scaffolding (`/users`, `/health`, `/rate_limit`, `/info`, `/auth/*`),
+    UI locale asset files, Wi-Fi 6E and UNMS items, and all captured secrets (CSRF tokens, syslog keys, auth keys, pre-shared keys).
+
+    **Caveats**
+    - The cloud collection contained no usable response schemas. `/v1/dpi/applications` there was mislabelled "List Hosts"
+      with an unrelated description, so it was replaced by `/v1/hosts` as per the Site Manager API. Verify against live responses.
+    - Controller-API schemas are deliberately partial (fields of interest only) and set `additionalProperties: true`.
+  license:
+    name: Internal use
+    identifier: LicenseRef-Internal
+servers:
+  - url: https://{host}
+    description: Local console (Cloud Key Gen2 Plus)
+    variables:
+      host:
+        default: 192.168.1.2
+        description: Console IP or DNS name
+  - url: https://api.ui.com
+    description: UniFi Site Manager (cloud)
+tags:
+  - name: Local
+    description: Local console (official Integration API and controller API)
+  - name: Cloud
+    description: UniFi Site Manager
+  - name: Integration API
+    description: Official, versioned local API (`/proxy/network/integration/v1`)
+  - name: Controller API
+    description: Undocumented controller endpoints; subject to change
+  - name: Sites
+  - name: Devices
+  - name: Clients
+  - name: Networks
+  - name: Firewall
+  - name: System
+  - name: Auth
+security:
+  - IntegrationApiKey: []
+paths:
+  # ------------------------------------------------------------------ AUTH (local)
+  /api/auth/login:
+    servers:
+      - url: https://{host}
+        variables: {host: {default: 192.168.1.2}}
+    post:
+      operationId: localLogin
+      summary: Log in to the console (session cookie)
+      description: Returns a `TOKEN` cookie and an `X-CSRF-Token` response header, both required by the controller API. MFA token is optional.
+      tags: [Local, Controller API, Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string, format: password}
+                token: {type: string, description: One-time MFA code, if enabled}
+                rememberMe: {type: boolean}
+      responses:
+        '200':
+          description: Logged in
+          headers:
+            X-CSRF-Token: {schema: {type: string}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  # ------------------------------------------------------------------ INTEGRATION API (local, official)
+  /proxy/network/integration/v1/info:
+    get:
+      operationId: getApplicationInfo
+      summary: Get Network application info
+      tags: [Local, Integration API, System]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  applicationVersion: {type: string, examples: ['11.0.81']}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /proxy/network/integration/v1/sites:
+    get:
+      operationId: listLocalSites
+      summary: List local sites
+      description: The site UUID returned here is `{siteId}` for all other Integration API calls.
+      tags: [Local, Integration API, Sites]
+      parameters:
+        - {$ref: '#/components/parameters/Offset'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Filter'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SitePage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /proxy/network/integration/v1/sites/{siteId}/devices:
+    get:
+      operationId: listAdoptedDevices
+      summary: List adopted devices
+      tags: [Local, Integration API, Devices]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - {$ref: '#/components/parameters/Offset'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DevicePage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /proxy/network/integration/v1/sites/{siteId}/devices/{deviceId}:
+    get:
+      operationId: getDeviceDetails
+      summary: Get device details
+      tags: [Local, Integration API, Devices]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - {$ref: '#/components/parameters/DeviceId'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeviceDetails'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /proxy/network/integration/v1/sites/{siteId}/devices/{deviceId}/statistics/latest:
+    get:
+      operationId: getLatestDeviceStatistics
+      summary: Get latest device statistics
+      tags: [Local, Integration API, Devices]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - {$ref: '#/components/parameters/DeviceId'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeviceStatistics'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /proxy/network/integration/v1/sites/{siteId}/devices/{deviceId}/actions:
+    post:
+      operationId: executeDeviceAction
+      summary: Execute a device action (for example restart)
+      x-destructive: true
+      tags: [Local, Integration API, Devices]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - {$ref: '#/components/parameters/DeviceId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ActionRequest'}
+      responses:
+        '200': {description: Action accepted}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /proxy/network/integration/v1/sites/{siteId}/devices/{deviceId}/interfaces/ports/{portIdx}/actions:
+    post:
+      operationId: executePortAction
+      summary: Execute a port action (for example PoE power-cycle)
+      x-destructive: true
+      tags: [Local, Integration API, Devices]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - {$ref: '#/components/parameters/DeviceId'}
+        - name: portIdx
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ActionRequest'}
+      responses:
+        '200': {description: Action accepted}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /proxy/network/integration/v1/sites/{siteId}/clients:
+    get:
+      operationId: listConnectedClients
+      summary: List connected clients
+      description: Filterable properties include `id`, `type`, `macAddress`, `ipAddress`, `connectedAt`, `access.type`, `access.authorized`.
+      tags: [Local, Integration API, Clients]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - {$ref: '#/components/parameters/Offset'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Filter'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ClientPage'}
+  /proxy/network/integration/v1/sites/{siteId}/clients/{clientId}:
+    get:
+      operationId: getConnectedClient
+      summary: Get connected client details
+      tags: [Local, Integration API, Clients]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - name: clientId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Client'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /proxy/network/integration/v1/sites/{siteId}/clients/{clientId}/actions:
+    post:
+      operationId: executeClientAction
+      summary: Execute a client action (for example authorise guest)
+      x-destructive: true
+      tags: [Local, Integration API, Clients]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - name: clientId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ActionRequest'}
+      responses:
+        '200': {description: Action accepted}
+  /proxy/network/integration/v1/sites/{siteId}/networks:
+    get:
+      operationId: listNetworks
+      summary: List networks (VLANs)
+      tags: [Local, Integration API, Networks]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - {$ref: '#/components/parameters/Offset'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Filter'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NetworkPage'}
+  /proxy/network/integration/v1/sites/{siteId}/networks/{networkId}:
+    get:
+      operationId: getNetworkDetails
+      summary: Get network details
+      tags: [Local, Integration API, Networks]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - name: networkId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Network'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /proxy/network/integration/v1/sites/{siteId}/traffic-matching-lists:
+    get:
+      operationId: listTrafficMatchingLists
+      summary: List traffic matching lists (firewall objects)
+      tags: [Local, Integration API, Firewall]
+      parameters:
+        - {$ref: '#/components/parameters/SiteId'}
+        - {$ref: '#/components/parameters/Offset'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Filter'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Page'}
+
+  # ------------------------------------------------------------------ CONTROLLER API (legacy, undocumented)
+  /proxy/network/api/s/{site}/stat/health:
+    get:
+      operationId: getSiteHealth
+      summary: Site health (WAN, LAN, WLAN subsystems)
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/stat/sysinfo:
+    get:
+      operationId: getSysInfo
+      summary: Controller system information
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/stat/widget/warnings:
+    get:
+      operationId: getSiteWarnings
+      summary: Dashboard warnings (upgradable devices, low disk, EOL devices)
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/stat/current-channel:
+    get:
+      operationId: getCurrentChannels
+      summary: Channels currently in use
+      tags: [Local, Controller API, Devices]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/stat/device:
+    get:
+      operationId: listDevicesDetailed
+      summary: Detailed device list (ports, STP, PoE, radios, VAPs)
+      description: Very large payload. Use `/stat/device-basic` or the Integration API unless port or radio detail is required.
+      tags: [Local, Controller API, Devices]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+    post:
+      operationId: listDevicesDetailedFiltered
+      summary: Detailed device list filtered by MAC
+      description: 'Body `{"macs": ["<mac>", ...]}`. Read-only despite using POST.'
+      tags: [Local, Controller API, Devices]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                macs:
+                  type: array
+                  items: {$ref: '#/components/schemas/MacAddress'}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/stat/device-basic:
+    get:
+      operationId: listDevicesBasic
+      summary: Minimal device list (adopted, disabled, mac, state, type)
+      tags: [Local, Controller API, Devices]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/stat/sta:
+    get:
+      operationId: listActiveClientsLegacy
+      summary: Active clients (legacy format)
+      tags: [Local, Controller API, Clients]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/stat/event:
+    get:
+      operationId: listEvents
+      summary: Recent events
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/stat/alarm:
+    get:
+      operationId: listAlarms
+      summary: Alarms
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/rest/user:
+    get:
+      operationId: listKnownClients
+      summary: Known clients (fixed IPs, names, notes, block state)
+      description: Source of truth for fixed-IP records. Changes here must be mirrored in the "Static IPs" sheet.
+      tags: [Local, Controller API, Clients]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+    post:
+      operationId: createKnownClient
+      summary: Create a known client (for example a fixed-IP reservation)
+      x-destructive: true
+      tags: [Local, Controller API, Clients]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/KnownClientWrite'}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/rest/user/{id}:
+    put:
+      operationId: updateKnownClient
+      summary: Update a known client (name, fixed IP, block)
+      x-destructive: true
+      tags: [Local, Controller API, Clients]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Site'}
+        - {$ref: '#/components/parameters/ObjectId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/KnownClientWrite'}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/cmd/stamgr:
+    post:
+      operationId: clientManagerCommand
+      summary: Client manager command (block, unblock, kick, forget)
+      description: Per the project rule, forgetting clients is done only from a reviewed MAC list.
+      x-destructive: true
+      tags: [Local, Controller API, Clients]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cmd]
+              properties:
+                cmd:
+                  type: string
+                  enum: [block-sta, unblock-sta, kick-sta, forget-sta]
+                mac: {$ref: '#/components/schemas/MacAddress'}
+                macs:
+                  type: array
+                  description: Used by `forget-sta`
+                  items: {$ref: '#/components/schemas/MacAddress'}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/rest/networkconf:
+    get:
+      operationId: listNetworkConfig
+      summary: Network configuration (VLANs, DHCP, IGMP, mDNS, zone assignment)
+      tags: [Local, Controller API, Networks]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/rest/firewallgroup:
+    get:
+      operationId: listFirewallGroups
+      summary: Firewall address and port groups
+      tags: [Local, Controller API, Firewall]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/rest/firewallgroup/{id}:
+    put:
+      operationId: updateFirewallGroup
+      summary: Update a firewall group
+      description: Structural change. Show a before/after diff and obtain approval first.
+      x-destructive: true
+      tags: [Local, Controller API, Firewall]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Site'}
+        - {$ref: '#/components/parameters/ObjectId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, group_type, group_members]
+              properties:
+                _id: {type: string}
+                site_id: {type: string}
+                name: {type: string}
+                group_type:
+                  type: string
+                  enum: [address-group, ipv6-address-group, port-group]
+                group_members:
+                  type: array
+                  items: {type: string}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/cmd/backup:
+    post:
+      operationId: backupCommand
+      summary: Backup command (list backups)
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cmd]
+              properties:
+                cmd: {type: string, enum: [list-backups]}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/api/s/{site}/cmd/system:
+    post:
+      operationId: systemCommand
+      summary: Create a controller backup
+      description: Take one before any structural change.
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cmd]
+              properties:
+                cmd: {type: string, enum: [backup]}
+                days: {type: integer, minimum: 0, description: '0 = settings only'}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+
+  # ------------------------------------------------------------------ CONTROLLER API v2
+  /proxy/network/v2/api/site/{site}/clients/active:
+    get:
+      operationId: listActiveClients
+      summary: Active clients with traffic usage
+      tags: [Local, Controller API, Clients]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Site'}
+        - {name: includeTrafficUsage, in: query, schema: {type: boolean, default: false}}
+        - {name: includeUnifiDevices, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/ActiveClient'}
+  /proxy/network/v2/api/site/{site}/clients/history:
+    get:
+      operationId: listClientHistory
+      summary: Historic clients (use to find stale or blocked clients)
+      tags: [Local, Controller API, Clients]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Site'}
+        - {name: onlyBlocked, in: query, schema: {type: boolean}}
+        - {name: withinHours, in: query, description: '0 = all', schema: {type: integer, minimum: 0}}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/v2/api/site/{site}/active-leases:
+    get:
+      operationId: listActiveLeases
+      summary: Active DHCP leases
+      tags: [Local, Controller API, Networks]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/v2/api/site/{site}/device:
+    get:
+      operationId: listDevicesV2
+      summary: Device list (v2)
+      tags: [Local, Controller API, Devices]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Site'}
+        - {name: separateUnmanaged, in: query, schema: {type: boolean, default: false}}
+        - {name: includeTrafficUsage, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+  /proxy/network/v2/api/site/{site}/topology:
+    get:
+      operationId: getTopology
+      summary: Network topology (edges and vertices)
+      tags: [Local, Controller API, Devices]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  edges: {type: array, items: {type: object, additionalProperties: true}}
+                  vertices: {type: array, items: {type: object, additionalProperties: true}}
+                  has_unknown_switch: {type: boolean}
+  /proxy/network/v2/api/site/{site}/firewall/zone:
+    get:
+      operationId: listFirewallZones
+      summary: Firewall zones and assigned networks
+      tags: [Local, Controller API, Firewall]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/FirewallZone'}
+  /proxy/network/v2/api/site/{site}/firewall/zone-matrix:
+    get:
+      operationId: getZoneMatrix
+      summary: Zone-to-zone policy matrix
+      tags: [Local, Controller API, Firewall]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      parameters: [{$ref: '#/components/parameters/Site'}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+
+  # ------------------------------------------------------------------ CONSOLE (UniFi OS) ROOT
+  /api/system/syslog/settings:
+    servers:
+      - url: https://{host}
+        variables: {host: {default: 192.168.1.2}}
+    get:
+      operationId: getSyslogSettings
+      summary: Console syslog settings (Insights Plus feed)
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+  /api/firmware/update:
+    servers:
+      - url: https://{host}
+        variables: {host: {default: 192.168.1.2}}
+    get:
+      operationId: getFirmwareUpdates
+      summary: Console firmware update status
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+  /api/backup/download:
+    servers:
+      - url: https://{host}
+        variables: {host: {default: 192.168.1.2}}
+    get:
+      operationId: downloadBackup
+      summary: Download a console backup
+      description: Treat the file as sensitive (contains configuration and credentials).
+      tags: [Local, Controller API, System]
+      security: [{SessionCookie: [], CsrfToken: []}]
+      responses:
+        '200':
+          description: Backup archive
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+
+  # ------------------------------------------------------------------ CLOUD (Site Manager)
+  /v1/hosts:
+    servers: [{url: 'https://api.ui.com'}]
+    get:
+      operationId: cloudListHosts
+      summary: List hosts (consoles) on the account
+      tags: [Cloud, Sites]
+      security: [{CloudApiKey: []}]
+      parameters:
+        - {name: pageSize, in: query, schema: {type: string}}
+        - {name: nextToken, in: query, schema: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/CloudOk'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/hosts/{hostId}:
+    servers: [{url: 'https://api.ui.com'}]
+    get:
+      operationId: cloudGetHost
+      summary: Get host by ID
+      tags: [Cloud, Sites]
+      security: [{CloudApiKey: []}]
+      parameters:
+        - {name: hostId, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/CloudOk'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/sites:
+    servers: [{url: 'https://api.ui.com'}]
+    get:
+      operationId: cloudListSites
+      summary: List sites across hosts
+      tags: [Cloud, Sites]
+      security: [{CloudApiKey: []}]
+      responses:
+        '200': {$ref: '#/components/responses/CloudOk'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/devices:
+    servers: [{url: 'https://api.ui.com'}]
+    get:
+      operationId: cloudListDevices
+      summary: List devices across hosts
+      tags: [Cloud, Devices]
+      security: [{CloudApiKey: []}]
+      parameters:
+        - {name: hostIds, in: query, schema: {type: array, items: {type: string}}, explode: true}
+        - {name: time, in: query, description: Last-processed timestamp filter, schema: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/CloudOk'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+components:
+  securitySchemes:
+    IntegrationApiKey:
+      type: apiKey
+      in: header
+      name: X-API-KEY
+      description: Local API key created in Network > Settings > Control Plane > Integrations. Store in Keeper.
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: TOKEN
+      description: Session cookie returned by `/api/auth/login`.
+    CsrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: Required on controller API calls; returned by login and refreshed via `X-Updated-Csrf-Token`.
+    CloudApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Site Manager API key created at unifi.ui.com.
+  parameters:
+    SiteId:
+      name: siteId
+      in: path
+      required: true
+      description: Site UUID from `listLocalSites`.
+      schema: {type: string, format: uuid}
+    Site:
+      name: site
+      in: path
+      required: true
+      description: Site name; `default` on this console.
+      schema: {type: string, default: default}
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    ObjectId:
+      name: id
+      in: path
+      required: true
+      description: Controller object `_id` (24-character hex).
+      schema: {type: string, pattern: '^[0-9a-f]{24}$'}
+    Offset:
+      name: offset
+      in: query
+      schema: {type: integer, minimum: 0, default: 0}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 200, default: 25}
+    Filter:
+      name: filter
+      in: query
+      description: Integration API filter expression, for example `name.eq('LAN_IoT')`.
+      schema: {type: string}
+  responses:
+    LegacyOk:
+      description: OK
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/LegacyEnvelope'}
+    CloudOk:
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  schemas:
+    MacAddress:
+      type: string
+      pattern: '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'
+      examples: ['00:00:5e:00:53:01']
+    Error:
+      type: object
+      properties:
+        statusCode: {type: integer}
+        statusName: {type: string}
+        message: {type: string}
+    LegacyEnvelope:
+      type: object
+      properties:
+        meta:
+          type: object
+          properties:
+            rc: {type: string, enum: [ok, error]}
+            msg: {type: string}
+        data:
+          type: array
+          items: {type: object, additionalProperties: true}
+    Page:
+      type: object
+      properties:
+        offset: {type: integer}
+        limit: {type: integer}
+        count: {type: integer}
+        totalCount: {type: integer}
+        data: {type: array, items: {type: object, additionalProperties: true}}
+    Site:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        internalReference: {type: string, examples: [default]}
+        name: {type: string}
+    SitePage:
+      allOf:
+        - {$ref: '#/components/schemas/Page'}
+        - type: object
+          properties:
+            data: {type: array, items: {$ref: '#/components/schemas/Site'}}
+    DeviceSummary:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        model: {type: string}
+        macAddress: {$ref: '#/components/schemas/MacAddress'}
+        ipAddress: {type: string}
+        state: {type: string, examples: [ONLINE]}
+        features: {type: array, items: {type: string, enum: [switching, accessPoint]}}
+        interfaces: {type: array, items: {type: string, enum: [ports, radios]}}
+    DevicePage:
+      allOf:
+        - {$ref: '#/components/schemas/Page'}
+        - type: object
+          properties:
+            data: {type: array, items: {$ref: '#/components/schemas/DeviceSummary'}}
+    DeviceDetails:
+      allOf:
+        - {$ref: '#/components/schemas/DeviceSummary'}
+        - type: object
+          properties:
+            firmwareVersion: {type: string}
+            firmwareUpdatable: {type: boolean}
+            supported: {type: boolean}
+            adoptedAt: {type: string, format: date-time}
+            provisionedAt: {type: string, format: date-time}
+            configurationId: {type: string}
+            uplink:
+              type: object
+              properties:
+                deviceId: {type: string, format: uuid}
+            interfaces:
+              type: object
+              properties:
+                ports:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      idx: {type: integer}
+                      state: {type: string}
+                      connector: {type: string}
+                      speedMbps: {type: integer}
+                      maxSpeedMbps: {type: integer}
+                      poe:
+                        type: object
+                        properties:
+                          enabled: {type: boolean}
+                          standard: {type: string}
+                          state: {type: string}
+                          type: {type: integer}
+                radios:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      frequencyGHz: {type: string}
+                      wlanStandard: {type: string}
+                      channel: {type: integer}
+                      channelWidthMHz: {type: integer}
+    DeviceStatistics:
+      type: object
+      properties:
+        uptimeSec: {type: integer}
+        lastHeartbeatAt: {type: string, format: date-time}
+        nextHeartbeatAt: {type: string, format: date-time}
+        loadAverage1Min: {type: number}
+        loadAverage5Min: {type: number}
+        loadAverage15Min: {type: number}
+        cpuUtilizationPct: {type: number}
+        memoryUtilizationPct: {type: number}
+        uplink:
+          type: object
+          properties:
+            txRateBps: {type: integer}
+            rxRateBps: {type: integer}
+        interfaces:
+          type: object
+          properties:
+            radios:
+              type: array
+              items:
+                type: object
+                properties:
+                  frequencyGHz: {type: string}
+                  txRetriesPct: {type: number}
+    ActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action: {type: string, description: Action name as supported by the target object}
+    Client:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        type: {type: string, examples: [WIRED, WIRELESS, VPN]}
+        connectedAt: {type: string, format: date-time}
+        ipAddress: {type: string}
+        access:
+          type: object
+          additionalProperties: true
+    ClientPage:
+      allOf:
+        - {$ref: '#/components/schemas/Page'}
+        - type: object
+          properties:
+            data: {type: array, items: {$ref: '#/components/schemas/Client'}}
+    Network:
+      type: object
+      additionalProperties: true
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string, examples: [LAN_IoT]}
+        vlanId: {type: integer}
+        enabled: {type: boolean}
+    NetworkPage:
+      allOf:
+        - {$ref: '#/components/schemas/Page'}
+        - type: object
+          properties:
+            data: {type: array, items: {$ref: '#/components/schemas/Network'}}
+    FirewallZone:
+      type: object
+      properties:
+        _id: {type: string}
+        name: {type: string, examples: [Internal, External, Gateway, Vpn, Hotspot, Dmz, IoT, Sonos]}
+        zone_key: {type: string}
+        default_zone: {type: boolean}
+        attr_no_edit: {type: boolean}
+        network_ids: {type: array, items: {type: string}}
+    KnownClientWrite:
+      type: object
+      description: Subset of the known-client record used for fixed-IP and naming changes.
+      additionalProperties: true
+      properties:
+        mac: {$ref: '#/components/schemas/MacAddress'}
+        name: {type: string}
+        noted: {type: boolean}
+        use_fixedip: {type: boolean}
+        fixed_ip: {type: string, format: ipv4}
+        network_id: {type: string}
+        blocked: {type: boolean}
+    ActiveClient:
+      type: object
+      additionalProperties: true
+      properties:
+        id: {type: string}
+        mac: {$ref: '#/components/schemas/MacAddress'}
+        name: {type: string}
+        display_name: {type: string}
+        hostname: {type: string}
+        ip: {type: string}
+        fixed_ip: {type: string}
+        use_fixedip: {type: boolean}
+        is_wired: {type: boolean}
+        network_id: {type: string}
+        network_name: {type: string}
+        vlan: {type: integer}
+        oui: {type: string}
+        status: {type: string}
+        last_uplink_mac: {type: string}
+        last_uplink_name: {type: string}
+        signal: {type: integer}
+        satisfaction: {type: integer}
+        uptime: {type: integer}
