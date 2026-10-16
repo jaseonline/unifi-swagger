@@ -10,7 +10,7 @@ info:
     - **Local** (tag `Local`): console at `https://{host}` (default `192.168.1.2`, self-signed certificate).
       - *Official Integration API* under `/proxy/network/integration/v1` (API key).
       - *Controller API (undocumented, community-reverse-engineered)* under `/proxy/network/api/s/{site}` and
-        `/proxy/network/v2/api/site/{site}` (session cookie plus CSRF token). May change between Network Application releases.
+        `/proxy/network/v2/api/site/{site}` (`ControllerSession`: session cookie plus CSRF token). May change between Network Application releases.
     - **Cloud** (tag `Cloud`): UniFi Site Manager at `https://api.ui.com` (API key from unifi.ui.com).
 
     **Conventions**
@@ -57,7 +57,7 @@ tags:
   - name: System
   - name: Auth
 security:
-  - IntegrationApiKey: []
+  - ApiKey: []
 paths:
   # ------------------------------------------------------------------ AUTH (local)
   /api/auth/login:
@@ -317,7 +317,7 @@ paths:
       operationId: getSiteHealth
       summary: Site health (WAN, LAN, WLAN subsystems)
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -326,7 +326,7 @@ paths:
       operationId: getSysInfo
       summary: Controller system information
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -335,7 +335,7 @@ paths:
       operationId: getSiteWarnings
       summary: Dashboard warnings (upgradable devices, low disk, EOL devices)
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -344,7 +344,7 @@ paths:
       operationId: getCurrentChannels
       summary: Channels currently in use
       tags: [Local, Controller API, Devices]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -354,7 +354,7 @@ paths:
       summary: Detailed device list (ports, STP, PoE, radios, VAPs)
       description: Very large payload. Use `/stat/device-basic` or the Integration API unless port or radio detail is required.
       tags: [Local, Controller API, Devices]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -363,7 +363,7 @@ paths:
       summary: Detailed device list filtered by MAC
       description: 'Body `{"macs": ["<mac>", ...]}`. Read-only despite using POST.'
       tags: [Local, Controller API, Devices]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       requestBody:
         content:
@@ -381,7 +381,7 @@ paths:
       operationId: listDevicesBasic
       summary: Minimal device list (adopted, disabled, mac, state, type)
       tags: [Local, Controller API, Devices]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -390,7 +390,7 @@ paths:
       operationId: listActiveClientsLegacy
       summary: Active clients (legacy format)
       tags: [Local, Controller API, Clients]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -399,7 +399,7 @@ paths:
       operationId: listEvents
       summary: Recent events
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -408,7 +408,7 @@ paths:
       operationId: listAlarms
       summary: Alarms
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -418,7 +418,7 @@ paths:
       summary: Known clients (fixed IPs, names, notes, block state)
       description: Source of truth for fixed-IP records. Changes here must be mirrored in the "Static IPs" sheet.
       tags: [Local, Controller API, Clients]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -427,7 +427,7 @@ paths:
       summary: Create a known client (for example a fixed-IP reservation)
       x-destructive: true
       tags: [Local, Controller API, Clients]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       requestBody:
         required: true
@@ -442,7 +442,7 @@ paths:
       summary: Update a known client (name, fixed IP, block)
       x-destructive: true
       tags: [Local, Controller API, Clients]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters:
         - {$ref: '#/components/parameters/Site'}
         - {$ref: '#/components/parameters/ObjectId'}
@@ -460,7 +460,7 @@ paths:
       description: Per the project rule, forgetting clients is done only from a reviewed MAC list.
       x-destructive: true
       tags: [Local, Controller API, Clients]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       requestBody:
         required: true
@@ -485,7 +485,7 @@ paths:
       operationId: listNetworkConfig
       summary: Network configuration (VLANs, DHCP, IGMP, mDNS, zone assignment)
       tags: [Local, Controller API, Networks]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -494,7 +494,7 @@ paths:
       operationId: listFirewallGroups
       summary: Firewall address and port groups
       tags: [Local, Controller API, Firewall]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -505,7 +505,7 @@ paths:
       description: Structural change. Show a before/after diff and obtain approval first.
       x-destructive: true
       tags: [Local, Controller API, Firewall]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters:
         - {$ref: '#/components/parameters/Site'}
         - {$ref: '#/components/parameters/ObjectId'}
@@ -533,7 +533,7 @@ paths:
       operationId: backupCommand
       summary: Backup command (list backups)
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       requestBody:
         required: true
@@ -552,7 +552,7 @@ paths:
       summary: Create a controller backup
       description: Take one before any structural change.
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       requestBody:
         required: true
@@ -573,7 +573,7 @@ paths:
       operationId: listActiveClients
       summary: Active clients with traffic usage
       tags: [Local, Controller API, Clients]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters:
         - {$ref: '#/components/parameters/Site'}
         - {name: includeTrafficUsage, in: query, schema: {type: boolean, default: false}}
@@ -591,7 +591,7 @@ paths:
       operationId: listClientHistory
       summary: Historic clients (use to find stale or blocked clients)
       tags: [Local, Controller API, Clients]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters:
         - {$ref: '#/components/parameters/Site'}
         - {name: onlyBlocked, in: query, schema: {type: boolean}}
@@ -603,7 +603,7 @@ paths:
       operationId: listActiveLeases
       summary: Active DHCP leases
       tags: [Local, Controller API, Networks]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -612,7 +612,7 @@ paths:
       operationId: listDevicesV2
       summary: Device list (v2)
       tags: [Local, Controller API, Devices]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters:
         - {$ref: '#/components/parameters/Site'}
         - {name: separateUnmanaged, in: query, schema: {type: boolean, default: false}}
@@ -624,7 +624,7 @@ paths:
       operationId: getTopology
       summary: Network topology (edges and vertices)
       tags: [Local, Controller API, Devices]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200':
@@ -642,7 +642,7 @@ paths:
       operationId: listFirewallZones
       summary: Firewall zones and assigned networks
       tags: [Local, Controller API, Firewall]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200':
@@ -657,7 +657,7 @@ paths:
       operationId: getZoneMatrix
       summary: Zone-to-zone policy matrix
       tags: [Local, Controller API, Firewall]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       parameters: [{$ref: '#/components/parameters/Site'}]
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -671,7 +671,7 @@ paths:
       operationId: getSyslogSettings
       summary: Console syslog settings (Insights Plus feed)
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       responses:
         '200': {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
   /api/firmware/update:
@@ -682,7 +682,7 @@ paths:
       operationId: getFirmwareUpdates
       summary: Console firmware update status
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       responses:
         '200': {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
   /api/backup/download:
@@ -694,7 +694,7 @@ paths:
       summary: Download a console backup
       description: Treat the file as sensitive (contains configuration and credentials).
       tags: [Local, Controller API, System]
-      security: [{SessionCookie: [], CsrfToken: []}]
+      security: [{ControllerSession: []}]
       responses:
         '200':
           description: Backup archive
@@ -709,7 +709,7 @@ paths:
       operationId: cloudListHosts
       summary: List hosts (consoles) on the account
       tags: [Cloud, Sites]
-      security: [{CloudApiKey: []}]
+      security: [{ApiKey: []}]
       parameters:
         - {name: pageSize, in: query, schema: {type: string}}
         - {name: nextToken, in: query, schema: {type: string}}
@@ -722,7 +722,7 @@ paths:
       operationId: cloudGetHost
       summary: Get host by ID
       tags: [Cloud, Sites]
-      security: [{CloudApiKey: []}]
+      security: [{ApiKey: []}]
       parameters:
         - {name: hostId, in: path, required: true, schema: {type: string}}
       responses:
@@ -734,7 +734,7 @@ paths:
       operationId: cloudListSites
       summary: List sites across hosts
       tags: [Cloud, Sites]
-      security: [{CloudApiKey: []}]
+      security: [{ApiKey: []}]
       responses:
         '200': {$ref: '#/components/responses/CloudOk'}
         '401': {$ref: '#/components/responses/Unauthorized'}
@@ -744,7 +744,7 @@ paths:
       operationId: cloudListDevices
       summary: List devices across hosts
       tags: [Cloud, Devices]
-      security: [{CloudApiKey: []}]
+      security: [{ApiKey: []}]
       parameters:
         - {name: hostIds, in: query, schema: {type: array, items: {type: string}}, explode: true}
         - {name: time, in: query, description: Last-processed timestamp filter, schema: {type: string}}
@@ -754,26 +754,23 @@ paths:
 
 components:
   securitySchemes:
-    IntegrationApiKey:
+    ApiKey:
       type: apiKey
       in: header
       name: X-API-KEY
-      description: Local API key created in Network > Settings > Control Plane > Integrations. Store in Keeper.
-    SessionCookie:
+      description: |
+        API key sent in the `X-API-KEY` header (header names are case-insensitive). Used by the official APIs on both servers, but each server has its own key:
+        - **Local console:** created in Network > Settings > Control Plane > Integrations.
+        - **Cloud (Site Manager):** created at unifi.ui.com.
+        Store both in Keeper.
+    ControllerSession:
       type: apiKey
       in: cookie
       name: TOKEN
-      description: Session cookie returned by `/api/auth/login`.
-    CsrfToken:
-      type: apiKey
-      in: header
-      name: X-CSRF-Token
-      description: Required on controller API calls; returned by login and refreshed via `X-Updated-Csrf-Token`.
-    CloudApiKey:
-      type: apiKey
-      in: header
-      name: X-API-Key
-      description: Site Manager API key created at unifi.ui.com.
+      description: |
+        Session for the undocumented controller API. Obtain it from `/api/auth/login`, which returns a `TOKEN` cookie and an `X-CSRF-Token` response header.
+        Send the cookie on every call and echo `X-CSRF-Token` as a request header on every call. The server refreshes it via the `X-Updated-Csrf-Token` response header.
+        OpenAPI cannot express a cookie plus a header as one scheme, so the CSRF header is documented here rather than as a second scheme.
   parameters:
     SiteId:
       name: siteId
