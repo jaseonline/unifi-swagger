@@ -1920,6 +1920,527 @@ paths:
                   has_unknown_switch: {type: boolean, description: 'True when an unmanaged switch is inferred between two nodes'}
         '401': {$ref: '#/components/responses/LegacyUnauthorized'}
 
+  /proxy/network/api/s/{site}/rest/device/{deviceId}:
+    parameters:
+      - {$ref: '#/components/parameters/Site'}
+      - name: deviceId
+        in: path
+        required: true
+        description: Device ID as used by the UI (a UUID on 11.0.81).
+        schema: {type: string, examples: [6b1d2c3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e]}
+    put:
+      operationId: updateDeviceSettings
+      summary: Update a device's settings or switch ports (name, LED, IP, SNMP, STP, port_overrides)
+      description: |
+        What the UI saves from a device's *Settings* panel and from switch port edits. Covers what the Integration
+        API cannot change: name, LED, management network and IP, SNMP contact/location; on switches jumbo frames,
+        flow control, STP version/priority, 802.1X and every port's settings; on gateways NAT mode, hardware offload
+        and firewall state timeouts. The UI sends either the settings panel or `port_overrides`, not both.
+        Whether partial panel bodies are accepted has not been tested, so send every field read from the device.
+
+        **Switch ports (`port_overrides`):** the array **replaces** the device's saved port settings. There is no
+        separate read call: the UI builds it from the `port_overrides` it already holds from `getDeviceDetail` /
+        `listDevicesDetailed`. Read that, change the entries for the target ports, and send every entry back (the UI
+        puts the edited ports first; order does not matter). An entry left out presumably loses its overrides and
+        returns to defaults. Several ports can be changed in one call.
+        - Disable a port: `forward: disabled` (the UI also clears `native_networkconf_id` and sets
+          `tagged_vlan_mgmt: block_all`).
+        - Re-enable: `forward: all` (or `customize`) with a `native_networkconf_id`. **Pick the network the device
+          belongs on:** re-enabling in the UI defaults to the first network, which can move a device off its VLAN.
+
+        **Gateways:** saving the panel, even just a rename, also sends `firewall_state_timeouts`, `nat_mode` and
+        `hardware_offload`, and the UI follows it with `updateSiteSetting` for `usg` and `global_nat` and a POST to
+        `settings/ipsec`. Treat any gateway save as a firewall change.
+
+        **High impact (written plan and approval first, backup taken):** `config_network` (a wrong IP, mask or
+        gateway strands the device until it is re-adopted or reset), `stp_priority` / `stp_version` and the port
+        `stp_*` fields (re-elect the STP root and can block ports), any `native_networkconf_id` or `forward` change
+        (VLAN membership), and anything on the gateway.
+
+        **Lowest-risk tests:** `deviceManagerCommand` `set-locate` (no configuration change), then renaming a switch
+        or AP, or its `led_override` (`on` / `off` / `default`).
+      x-destructive: true
+      tags: [Controller · Devices]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DeviceSettingsWrite'}
+            examples:
+              ledOff:
+                summary: Turn the LED off (full body as the UI sends it)
+                value:
+                  name: Switch 8 PoE-60W
+                  config_network: {type: static, ip: 192.168.1.4, netmask: 255.255.255.0, gateway: 192.168.1.1, dns1: 192.168.1.1, dns2: '', dnssuffix: '', bonding_enabled: false}
+                  mgmt_network_id: 5d2c9a7e-1f3b-4c6d-8e2a-7b9f0c1d3e4a
+                  led_override: 'off'
+                  led_override_color: '#0000ff'
+                  led_override_color_brightness: 100
+                  snmp_contact: admin@example.com
+                  snmp_location: Comms cupboard
+                  jumboframe_enabled: true
+                  flowctrl_enabled: true
+                  stp_version: stp
+                  stp_priority: '8192'
+                  dot1x_portctrl_enabled: false
+                  ether_lighting: {}
+              disablePort:
+                summary: Disable port 3 (the other overridden ports are sent unchanged; shortened to two here)
+                value:
+                  port_overrides:
+                    - {port_idx: 3, setting_preference: manual, name: TV, forward: disabled, native_networkconf_id: '', tagged_vlan_mgmt: block_all, excluded_networkconf_ids: [], port_security_enabled: false, port_security_mac_address: [], autoneg: true, isolation: false, flow_control_enabled: false, lldpmed_enabled: false, voice_networkconf_id: '', dot1x_ctrl: force_authorized, dot1x_idle_timeout: 300, multicast_router_mode: NONE, multicast_router_networkconf_ids: [], stormctrl_type: rate, stormctrl_bcast_enabled: true, stormctrl_bcast_rate: 100, stormctrl_mcast_enabled: true, stormctrl_mcast_rate: 200, stormctrl_ucast_enabled: true, stormctrl_ucast_rate: 100, egress_rate_limit_kbps_enabled: false, link_debounce_auto: true, port_keepalive_enabled: true, stp_port_mode: true, stp_uplink: false, stp_edge_state: disabled, stp_bpdu_guard_enabled: false}
+                    - {port_idx: 1, setting_preference: manual, name: Uplink, forward: all, native_networkconf_id: 5d2c9a7e-1f3b-4c6d-8e2a-7b9f0c1d3e4a, tagged_vlan_mgmt: auto, port_security_enabled: false, port_security_mac_address: [], autoneg: true, isolation: false, flow_control_enabled: false, lldpmed_enabled: false, voice_networkconf_id: '', multicast_router_mode: NONE, stormctrl_type: rate, stormctrl_bcast_enabled: true, stormctrl_bcast_rate: 300, stormctrl_mcast_enabled: true, stormctrl_mcast_rate: 500, stormctrl_ucast_enabled: true, stormctrl_ucast_rate: 1000, egress_rate_limit_kbps_enabled: false, port_keepalive_enabled: true, stp_port_mode: true, stp_edge_state: auto, stp_bpdu_guard_enabled: false}
+              renameGateway:
+                summary: Gateway panel save (rename); followed by updateSiteSetting usg and global_nat
+                value:
+                  name: Gateway TEST
+                  led_override: 'off'
+                  led_override_color: '#0000ff'
+                  led_override_color_brightness: 100
+                  hardware_offload: true
+                  snmp_location: Comms cupboard
+                  snmp_contact: admin@example.com
+                  jumboframe_enabled: true
+                  flowctrl_enabled: false
+                  firewall_state_timeouts: {timeout_setting_preference: auto, tcp_established_timeout: 7440, tcp_close_timeout: 10, tcp_close_wait_timeout: 60, tcp_fin_wait_timeout: 120, tcp_last_ack_timeout: 30, tcp_syn_recv_timeout: 60, tcp_syn_sent_timeout: 120, tcp_time_wait_timeout: 120, udp_stream_timeout: 180, udp_other_timeout: 30, icmp_timeout: 30, other_timeout: 600, unbind_wan_monitors: false, dns_verification: {setting_preference: auto, domain: ui.com, primary_dns_server: 1.1.1.1, secondary_dns_server: 8.8.8.8}}
+                  firewall_connection_tracking_modules: []
+                  nat_mode: auto
+                  nat_excluded_network_ids: []
+                  ikev2_seamless_rekeying: false
+      responses:
+        '200':
+          description: OK. `data[0]` is the whole updated device record (including `port_overrides`).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/LegacyEnvelope'}
+                  - properties: {data: {type: array, items: {$ref: '#/components/schemas/LegacyDevice'}}}
+        '400': {$ref: '#/components/responses/LegacyBadRequest'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/stats/recent/series:
+    get:
+      operationId: getStatsSeries
+      summary: Device time-series statistics (per-port traffic, errors and PoE; CPU and memory)
+      description: |
+        The data behind the UI's history charts. `schema` picks the series; `portBySiteByDevice` with
+        `projection=nested(byPort)` returns, for one switch, every port's traffic, broadcast/multicast, error and drop
+        counts and PoE draw per bucket. Each bucket holds totals for its `duration` (fractional because values are
+        normalised to the bucket); the last bucket is partial. `systemBySiteByDevice` with
+        `projection=values(avgCpuUtilizationPct, avgMemoryUtilizationPct)` returns CPU and memory for any device.
+
+        Use it to find a flapping, erroring or saturated port, or a PoE device near its budget, and to see when it
+        started. `filter` uses the same syntax as the Integration API.
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      parameters:
+        - name: schema
+          in: query
+          required: true
+          description: Series to return. Captured so far are `portBySiteByDevice` (switch ports) and `systemBySiteByDevice` (CPU, memory).
+          schema: {type: string, examples: [portBySiteByDevice, systemBySiteByDevice]}
+        - name: period
+          in: query
+          required: true
+          description: Window length ending at `end`.
+          schema: {type: string, examples: [DAY]}
+        - name: end
+          in: query
+          required: true
+          description: Window end, Unix epoch milliseconds.
+          schema: {type: integer, examples: [1792214788931]}
+        - name: bucket
+          in: query
+          description: Omitted by the UI for `systemBySiteByDevice`.
+          schema: {type: string, examples: [OF_5_MINUTES]}
+        - name: filter
+          in: query
+          required: true
+          description: 'Which device: `deviceMac`, `siteId` (the site UUID, `site_id` on device records), and `unitId.isNull()` (or a unit for switch stacks).'
+          schema: {type: string}
+          examples:
+            oneSwitch:
+              summary: One switch, not stacked
+              value: "and(deviceMac.eq('00:00:5e:00:53:04'), unitId.isNull(), siteId.eq('6b1d2c3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e'))"
+        - name: projection
+          in: query
+          description: '`nested(byPort)` groups values per port inside each bucket; `values(a, b)` picks fields.'
+          schema: {type: string, examples: ['nested(byPort)', 'values(avgCpuUtilizationPct, avgMemoryUtilizationPct)']}
+        - name: noGaps
+          in: query
+          description: Fill missing buckets so the series is continuous.
+          schema: {type: boolean, default: false}
+      responses:
+        '200':
+          description: One entry per matching device
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/StatsSeries'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/stat/device/{mac}:
+    parameters:
+      - {$ref: '#/components/parameters/Site'}
+      - name: mac
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/MacAddress'}
+    get:
+      operationId: getDeviceDetail
+      summary: Full detail for one device (ports, STP, PoE, radios, uplink, LLDP, CPU and memory)
+      description: |
+        The same record as one entry of `listDevicesDetailed`, for a single device. Read this before
+        `updateDeviceSettings`: its `port_overrides` array is what a port change must be built from.
+
+        Useful fields: `port_table[]` (live state per port: `stp_state`, `stp_role`, `stp_state_change_count`,
+        `link_down_count`, error and drop counters, `satisfaction`, PoE), `uplink`, `lldp_table`, `system-stats`
+        (CPU, memory, uptime), `radio_table_stats` (APs: channel, utilisation, retries), `locating`, `led_override`.
+
+        **Sensitive:** fields prefixed `x_` (for example `x_authkey`, `x_aes_gcm`, `x_vwirekey`) are device keys.
+        Never log or store the raw response.
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK (one entry)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/LegacyEnvelope'}
+                  - properties: {data: {type: array, items: {$ref: '#/components/schemas/LegacyDevice'}}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/cmd/devmgr:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    post:
+      operationId: deviceManagerCommand
+      summary: Device command (locate, restart)
+      description: |
+        Captured commands:
+        - `set-locate` / `unset-locate`: flash the device LED so it can be found. Changes no configuration, so this
+          is the **lowest-risk test of write access**.
+        - `restart`: reboot the device. `reboot_type: hard` also power-cycles the PoE ports, so every device powered
+          by a switch goes down with it. Restarting a switch or the gateway takes down everything behind it.
+
+        The UI's *Debug* terminal also uses this endpoint (`build-ssh-session`, then `ssh-sdp-answer`) after
+        `cmd/cloudaccess` `get-turn-credentials` returns short-lived TURN relay credentials. That is a WebRTC
+        session through UniFi's relay, so it is not usable from an API client; use SSH instead.
+      x-destructive: true
+      tags: [Controller · Devices]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cmd, mac]
+              properties:
+                cmd: {type: string, enum: [set-locate, unset-locate, restart]}
+                mac: {$ref: '#/components/schemas/MacAddress'}
+                reboot_type: {type: string, enum: [soft, hard], description: '`restart` only. `hard` also power-cycles PoE ports.'}
+            examples:
+              locate: {summary: 'Start flashing the LED', value: {cmd: set-locate, mac: '00:00:5e:00:53:04'}}
+              stopLocate: {summary: 'Stop flashing', value: {cmd: unset-locate, mac: '00:00:5e:00:53:04'}}
+              restartHard: {summary: 'Restart and power-cycle PoE ports', value: {cmd: restart, mac: '00:00:5e:00:53:04', reboot_type: hard}}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyOk'}
+        '400': {$ref: '#/components/responses/LegacyBadRequest'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/set/setting/{key}:
+    parameters:
+      - {$ref: '#/components/parameters/Site'}
+      - name: key
+        in: path
+        required: true
+        description: Setting group, as in `getSiteSetting`
+        schema: {type: string, examples: [lcm, usg, global_nat]}
+    post:
+      operationId: updateSiteSetting
+      summary: Update one site setting group
+      description: |
+        Writes a group read by `getSiteSetting`. The body includes `key` (same as the path). Captured groups:
+        - `lcm`: the display (LCM touchscreen) on devices that have one: `enabled`, `brightness`, `idle_timeout`
+          (seconds), `touch_event`, `sync`. Not the status LED, which is per device (`led_override` on
+          `updateDeviceSettings`).
+        - `usg`: gateway-wide options: MSS clamping, ARP cache, connection-tracking helper modules (FTP, SIP, GRE,
+          PPTP, TFTP, H.323), firewall state timeouts.
+        - `global_nat`: NAT `mode` and `excluded_network_ids`.
+
+        The UI sends `usg` and `global_nat` automatically after any gateway *Settings* save, even a rename.
+        `usg` and `global_nat` change how the gateway forwards traffic: treat as firewall changes (written plan first).
+        Partial bodies have not been tested; send the whole group read from `getSiteSetting`.
+      x-destructive: true
+      tags: [Controller · System]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [key], additionalProperties: true, properties: {key: {type: string}}}
+            examples:
+              lcm:
+                summary: Device display settings
+                value: {key: lcm, enabled: true, brightness: 100, touch_event: true, idle_timeout: 300, sync: true}
+              usg:
+                summary: Gateway options as the UI sends them
+                value: {key: usg, mss_clamp: auto, mss_clamp_mss: '1452', arp_cache_timeout: normal, arp_cache_base_reachable: 30, echo_server: ping.ui.com, dns_verification: {setting_preference: auto}, timeout_setting_preference: auto, ftp_module: false, h323_module: false, sip_module: false, gre_module: false, pptp_module: false, tftp_module: false}
+              globalNat:
+                summary: Automatic NAT
+                value: {key: global_nat, mode: auto, excluded_network_ids: []}
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '400': {$ref: '#/components/responses/LegacyBadRequest'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/settings/usg/defaults:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: getGatewayDefaults
+      summary: Default gateway firewall state timeouts and DNS verification
+      description: The values `firewall_state_timeouts` returns to when `timeout_setting_preference` is `auto`. Compare with the gateway's current values to spot hand-tuned timeouts.
+      tags: [Controller · Firewall]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FirewallStateTimeouts'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/support/{mac}:
+    parameters:
+      - {$ref: '#/components/parameters/Site'}
+      - name: mac
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/MacAddress'}
+    get:
+      operationId: getDeviceSupportFileStatus
+      summary: Device support file status
+      description: |
+        For one adopted device (switch, AP, gateway), not the console. Seen: `READY_TO_GENERATE`, `GENERATING`.
+        The ready and download steps have not been captured yet.
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mac: {$ref: '#/components/schemas/MacAddress'}
+                  status: {type: string, examples: [READY_TO_GENERATE, GENERATING]}
+              example: {mac: '00:00:5e:00:53:04', status: READY_TO_GENERATE}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/support/{mac}/generation:
+    parameters:
+      - {$ref: '#/components/parameters/Site'}
+      - name: mac
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/MacAddress'}
+    post:
+      operationId: generateDeviceSupportFile
+      summary: Start generating a device support file (about 3 minutes)
+      description: |
+        Returns 200 with an empty body at once; the file is built on the device. Progress arrives on the site events
+        WebSocket as `meta.message: support-file:update` with `data[0].status` (see the Controller · Alerts tag), and
+        `getDeviceSupportFileStatus` can be polled. The UI sends the literal body `null`.
+      tags: [Controller · Devices]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: 'null'}
+            example: null
+      responses:
+        '200': {description: 'Generation started (empty body)'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/system-log/device/{mac}:
+    parameters:
+      - {$ref: '#/components/parameters/Site'}
+      - name: mac
+        in: path
+        required: true
+        description: Device MAC (the UI URL-encodes the colons)
+        schema: {$ref: '#/components/schemas/MacAddress'}
+    get:
+      operationId: listDeviceSystemLog
+      summary: Recent System Log entries for one device
+      description: What the device panel's *Activity* list shows, including admin changes made to the device.
+      tags: [Controller · System Log]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {name: mac, in: query, required: true, description: 'Same MAC as the path', schema: {$ref: '#/components/schemas/MacAddress'}}
+        - {name: scope, in: query, schema: {type: string, examples: [DEVICE]}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, examples: [6]}}
+      responses:
+        '200':
+          description: Newest first
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/SystemLogEntry'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/poe-info:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: getPoeInfo
+      summary: PoE use on one switch, and downlinks near their power limit
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {name: mac, in: query, required: true, description: 'Switch MAC', schema: {$ref: '#/components/schemas/MacAddress'}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  poe_host_device_info:
+                    type: object
+                    properties:
+                      mac: {$ref: '#/components/schemas/MacAddress'}
+                      display_name: {type: string}
+                      avg_poe_usage: {type: number, description: 'Watts'}
+                      max_poe_usage: {type: number, description: 'Watts'}
+                      near_power_limit_downlinks: {type: array, items: {type: object, additionalProperties: true}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/ports/port-anomalies:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listPortAnomalies
+      summary: Switch ports the controller flags as anomalous
+      description: An empty list when there are none (the only response captured so far).
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {type: object, additionalProperties: true}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/ports/history/timeline:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: getPortHistoryTimeline
+      summary: Port change timeline for a time window
+      description: An empty list when nothing changed (the only response captured so far). `getPortHistoryTimestamps` gives the times that have entries.
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TimeStartMs'}
+        - {$ref: '#/components/parameters/TimeEndMs'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {type: object, additionalProperties: true}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/ports/history/timestamps:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: getPortHistoryTimestamps
+      summary: Times (epoch ms) with port history in a window
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TimeStartMs'}
+        - {$ref: '#/components/parameters/TimeEndMs'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {type: integer}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/power-supervisors:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listPowerSupervisors
+      summary: Automatic power-cycle watchdogs on PoE-powered clients
+      description: |
+        Each entry watches a client and power-cycles its PoE port after `silence_threshold` missed heartbeats.
+        `consecutive_failures` shows whether one has been firing. Check before diagnosing a device that keeps rebooting.
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: {type: string}
+                    site_id: {type: string}
+                    client_mac: {$ref: '#/components/schemas/MacAddress'}
+                    enabled: {type: boolean}
+                    control_mode: {type: string}
+                    consecutive_failures: {type: integer}
+                    power_sources:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          power_source_mac: {$ref: '#/components/schemas/MacAddress'}
+                          power_source_type: {type: string}
+                          power_source_index: {type: integer, description: 'Port index on the power source'}
+                          client_psu_index: {type: integer}
+                    settings:
+                      type: object
+                      properties:
+                        heartbeat_interval: {type: integer}
+                        power_off_duration: {type: integer}
+                        silence_threshold: {type: integer}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/device/{mac}/fw-revert-options:
+    parameters:
+      - {$ref: '#/components/parameters/Site'}
+      - name: mac
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/MacAddress'}
+    get:
+      operationId: getFirmwareRevertOptions
+      summary: Previous firmware a device can be rolled back to
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  previous_firmware_version: {type: string}
+                  previous_firmware_url: {type: string, format: uri}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/device/upgrade/rollupgrade/eligible-devices:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listRollingUpgradeEligibleDevices
+      summary: Devices with a firmware upgrade available for a rolling upgrade
+      tags: [Controller · Devices]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  macs: {type: array, items: {$ref: '#/components/schemas/MacAddress'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
   /proxy/network/api/s/{site}/stat/sta:
     parameters: [{$ref: '#/components/parameters/Site'}]
     get:
@@ -7960,7 +8481,49 @@ components:
                   speed: {type: integer}
                   poe_enable: {type: boolean}
                   poe_power: {type: string, description: 'Watts'}
+                  port_poe: {type: boolean, description: 'Port can supply PoE'}
+                  enable: {type: boolean}
+                  forward: {type: string, enum: [all, customize, disabled]}
+                  native_networkconf_id: {type: string}
+                  is_uplink: {type: boolean}
+                  media: {type: string, examples: [GE, SFP+]}
+                  full_duplex: {type: boolean}
                   stp_state: {type: string, examples: [forwarding, blocking, disabled]}
+                  stp_role: {type: string}
+                  stp_pathcost: {type: integer}
+                  stp_state_change_count: {type: integer, description: 'A rising count means the port keeps re-converging'}
+                  link_down_count: {type: integer, description: 'A rising count means a flapping link'}
+                  rx_errors: {type: integer}
+                  tx_errors: {type: integer}
+                  rx_dropped: {type: integer}
+                  tx_dropped: {type: integer}
+                  satisfaction: {type: integer, description: '0-100'}
+                  satisfaction_reason: {type: string}
+                  mac_table_count: {type: integer, description: 'MACs learnt on the port'}
+                  anomalies: {type: integer}
+            port_overrides: {type: array, items: {$ref: '#/components/schemas/PortOverride'}, description: 'Saved port settings; the basis for a port change'}
+            led_override: {type: string, enum: ['on', 'off', default]}
+            locating: {type: boolean}
+            stp_version: {type: string}
+            stp_priority: {type: string}
+            system-stats:
+              type: object
+              properties:
+                cpu: {type: string, description: 'Percent'}
+                mem: {type: string, description: 'Percent'}
+                uptime: {type: string, description: 'Seconds'}
+            uplink: {type: object, additionalProperties: true, description: 'Upstream device, port, speed and counters'}
+            lldp_table:
+              type: array
+              items:
+                type: object
+                properties:
+                  local_port_idx: {type: integer}
+                  local_port_name: {type: string}
+                  chassis_id: {type: string}
+                  port_id: {type: string}
+                  is_wired: {type: boolean}
+            radio_table_stats: {type: array, items: {type: object, additionalProperties: true}, description: 'APs: per-radio channel, utilisation (`cu_total`), retries, client count'}
             radio_table: {type: array, items: {type: object, additionalProperties: true}}
             vap_table: {type: array, items: {type: object, additionalProperties: true}}
     LegacyNetworkConf:
@@ -8326,6 +8889,150 @@ components:
                    VPN_SITE_TO_SITE_DISCONNECTED, WAN_LAN_OVERLAP]
         clientDeviceMacs: {type: array, items: {type: string}, description: 'Limit to these clients'}
         adminIds: {type: array, items: {type: string}, description: 'Limit to actions by these admins'}
+    DeviceSettingsWrite:
+      type: object
+      description: Device settings as saved by the UI. Switch-only fields are ignored on other device types.
+      properties:
+        name: {type: string}
+        led_override: {type: string, enum: ['on', 'off', default], description: '`default` follows the site LED setting'}
+        led_override_color: {type: string, description: 'Hex colour (devices with RGB LEDs)', examples: ['#0000ff']}
+        led_override_color_brightness: {type: integer, minimum: 0, maximum: 100}
+        config_network:
+          type: object
+          description: Management IP. **Changing this can strand the device.**
+          properties:
+            type: {type: string, enum: [dhcp, static]}
+            ip: {type: string, format: ipv4}
+            netmask: {type: string, format: ipv4}
+            gateway: {type: string, format: ipv4}
+            dns1: {type: string}
+            dns2: {type: string}
+            dnssuffix: {type: string}
+            bonding_enabled: {type: boolean}
+        mgmt_network_id: {type: string, description: 'Network the device is managed on'}
+        snmp_contact: {type: string}
+        snmp_location: {type: string}
+        jumboframe_enabled: {type: boolean, description: 'Switches'}
+        flowctrl_enabled: {type: boolean, description: 'Switches'}
+        stp_version: {type: string, examples: [stp, rstp], description: 'Switches. **Topology-affecting.**'}
+        stp_priority: {type: string, description: 'Switches; a multiple of 4096 as a string. Lower wins root election. **Topology-affecting.**', examples: ['8192', '32768']}
+        dot1x_portctrl_enabled: {type: boolean, description: 'Switches'}
+        ether_lighting: {type: object, additionalProperties: true, description: 'Etherlighting switches only'}
+        port_overrides:
+          type: array
+          description: Switches. Replaces every saved port setting; see the operation description.
+          items: {$ref: '#/components/schemas/PortOverride'}
+        hardware_offload: {type: boolean, description: 'Gateways'}
+        nat_mode: {type: string, examples: [auto], description: 'Gateways'}
+        nat_excluded_network_ids: {type: array, items: {type: string}, description: 'Gateways'}
+        firewall_state_timeouts: {$ref: '#/components/schemas/FirewallStateTimeouts'}
+        firewall_connection_tracking_modules: {type: array, items: {type: string}, description: 'Gateways'}
+        ikev2_seamless_rekeying: {type: boolean, description: 'Gateways'}
+    StatsSeries:
+      type: object
+      properties:
+        siteId: {type: string}
+        deviceMac: {$ref: '#/components/schemas/MacAddress'}
+        unitId: {type: [integer, 'null'], description: 'Stack unit; null when not stacked'}
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp: {type: integer, description: 'Bucket start (epoch ms)'}
+              duration: {type: integer, description: 'Bucket length in ms (shorter for the last, partial bucket)'}
+              avgCpuUtilizationPct: {type: number, description: '`systemBySiteByDevice`'}
+              avgMemoryUtilizationPct: {type: number, description: '`systemBySiteByDevice`'}
+              byPort:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    portIdx: {type: integer}
+                    rxBytes: {type: number}
+                    txBytes: {type: number}
+                    rxPackets: {type: number}
+                    txPackets: {type: number}
+                    rxBcastPackets: {type: number}
+                    txBcastPackets: {type: number}
+                    rxMcastPackets: {type: number}
+                    txMcastPackets: {type: number}
+                    rxErrorPackets: {type: number, description: 'CRC and other receive errors; any steady count suggests a cable or optic fault'}
+                    txErrorPackets: {type: number}
+                    rxDroppedPackets: {type: number}
+                    txDroppedPackets: {type: number}
+                    avgPoePowerW: {type: number, description: 'PoE ports only'}
+                    maxPoePowerW: {type: number, description: 'PoE ports only'}
+    PortOverride:
+      type: object
+      description: Saved settings for one switch port, as held in a device's `port_overrides`.
+      required: [port_idx]
+      properties:
+        port_idx: {type: integer}
+        name: {type: string}
+        setting_preference: {type: string, enum: [auto, manual]}
+        forward:
+          type: string
+          enum: [all, customize, disabled]
+          description: '`all` = native network plus every VLAN tagged; `customize` = native plus `excluded_networkconf_ids` removed; `disabled` = port off.'
+        native_networkconf_id: {type: string, description: 'Untagged network (`_id` from `listNetworksLegacy` / `networkconf`). Empty when disabled. **Changing it moves the device to another VLAN.**'}
+        excluded_networkconf_ids: {type: array, items: {type: string}, description: 'Tagged networks blocked on this port (with `forward` = `customize`)'}
+        tagged_vlan_mgmt: {type: string, enum: [auto, block_all, custom]}
+        voice_networkconf_id: {type: string}
+        poe_mode: {type: string, examples: [auto, 'off', pasv24, passthrough]}
+        autoneg: {type: boolean}
+        speed: {type: integer, description: 'Mbps, when `autoneg` is false'}
+        full_duplex: {type: boolean}
+        flow_control_enabled: {type: boolean}
+        isolation: {type: boolean}
+        link_debounce_auto: {type: boolean}
+        port_keepalive_enabled: {type: boolean}
+        egress_rate_limit_kbps_enabled: {type: boolean}
+        egress_rate_limit_kbps: {type: integer}
+        port_security_enabled: {type: boolean}
+        port_security_mac_address: {type: array, items: {$ref: '#/components/schemas/MacAddress'}}
+        lldpmed_enabled: {type: boolean}
+        dot1x_ctrl: {type: string, examples: [force_authorized, auto, mac_based, multi_host]}
+        dot1x_idle_timeout: {type: integer}
+        multicast_router_mode: {type: string, examples: [NONE]}
+        multicast_router_networkconf_ids: {type: array, items: {type: string}}
+        sd_wan_underlay_port: {type: boolean}
+        stormctrl_type: {type: string, examples: [rate]}
+        stormctrl_bcast_enabled: {type: boolean}
+        stormctrl_bcast_rate: {type: integer, description: 'Packets per second'}
+        stormctrl_mcast_enabled: {type: boolean}
+        stormctrl_mcast_rate: {type: integer}
+        stormctrl_ucast_enabled: {type: boolean}
+        stormctrl_ucast_rate: {type: integer}
+        stp_port_mode: {type: boolean, description: 'STP enabled on the port. **Topology-affecting.**'}
+        stp_edge_state: {type: string, enum: [auto, enabled, disabled], description: 'Edge (PortFast) port'}
+        stp_bpdu_guard_enabled: {type: boolean, description: 'Shut the port if it receives a BPDU (another switch plugged in)'}
+        stp_uplink: {type: boolean}
+    FirewallStateTimeouts:
+      type: object
+      description: Gateway connection-tracking timeouts (seconds).
+      properties:
+        timeout_setting_preference: {type: string, enum: [auto, manual]}
+        tcp_established_timeout: {type: integer}
+        tcp_close_timeout: {type: integer}
+        tcp_close_wait_timeout: {type: integer}
+        tcp_fin_wait_timeout: {type: integer}
+        tcp_last_ack_timeout: {type: integer}
+        tcp_syn_recv_timeout: {type: integer}
+        tcp_syn_sent_timeout: {type: integer}
+        tcp_time_wait_timeout: {type: integer}
+        udp_stream_timeout: {type: integer}
+        udp_other_timeout: {type: integer}
+        icmp_timeout: {type: integer}
+        other_timeout: {type: integer}
+        unbind_wan_monitors: {type: boolean}
+        dns_verification:
+          type: object
+          properties:
+            setting_preference: {type: string, enum: [auto, manual]}
+            domain: {type: string}
+            primary_dns_server: {type: string}
+            secondary_dns_server: {type: string}
     SystemLogEntry:
       type: object
       description: |
