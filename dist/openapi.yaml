@@ -40,9 +40,10 @@ info:
     Legacy firewall rules are listed (read-only, deprecated) for completeness; the site uses the zone-based firewall.
 
     ## Caveats
-    - Integration API paths are confirmed against the maintained Art-of-WiFi client. Request/response shapes for firewall policies,
-      ACL rules, DNS policies, Wi-Fi security and traffic matching lists are partial and set `additionalProperties: true`.
-      Check against the console's own built-in API docs (*Settings > Control Plane > Integrations*) before writing.
+    - Integration API paths, parameters, enums and required fields are checked against the console's own built-in reference
+      (UniFi Network API 11.0.81, *Settings > Control Plane > Integrations*). Nested types (Wi-Fi security, firewall traffic
+      filters and schedules, ACL filters, IPv4/IPv6 network configuration and so on) come from the console's downloadable
+      OpenAPI document for 10.6.106, the newest complete one available; 11.0.81 may add variants not yet listed here.
     - Controller-API schemas are deliberately partial (fields of interest only).
     - `/v1/dpi/applications` in the cloud Postman export was mislabelled; it is a local Integration endpoint and is listed there.
   contact:
@@ -79,6 +80,8 @@ tags:
     description: Zone-based firewall - zones, policies, policy ordering, traffic matching lists.
   - name: Integration · ACL rules
     description: Switch ACL rules (layer 2/3 filtering enforced on switches).
+  - name: Integration · Switching
+    description: Read-only - switch stacks, MC-LAG domains and link aggregation groups (LAGs).
   - name: Integration · DNS
     description: Local DNS records and domain forwarding.
   - name: Integration · Hotspot
@@ -237,7 +240,9 @@ paths:
     get:
       operationId: listAdoptedDevices
       summary: List adopted devices
-      description: Filterable on `id`, `macAddress`, `ipAddress`, `name`, `model`, `state`, `supported`, `firmwareVersion`, `firmwareUpdatable`, `features`, `interfaces`.
+      description: |
+        Filterable on `id`, `macAddress`, `ipAddress`, `model`, `state` (`eq ne in notIn`), `name` (also `like`), `supported`,
+        `firmwareUpdatable` (`eq ne`), `firmwareVersion` (all comparisons, `like`, `isNull`), `features` and `interfaces` (set functions).
       tags: [Integration · Devices]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
@@ -270,10 +275,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [macAddress]
+              required: [macAddress, ignoreDeviceLimit]
               properties:
                 macAddress: {$ref: '#/components/schemas/MacAddress'}
-                ignoreDeviceLimit: {type: boolean, default: false, description: 'Adopt even if the console''s device limit is reached'}
+                ignoreDeviceLimit: {type: boolean, description: 'Adopt even if the console''s device limit is reached'}
+            example: {macAddress: '00:00:5e:00:53:20', ignoreDeviceLimit: false}
       responses:
         '200':
           description: Adoption started
@@ -307,8 +313,8 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
     delete:
       operationId: removeDevice
-      summary: Remove (forget) an adopted device
-      description: The device is factory-reset on its next contact and must be re-adopted.
+      summary: Remove (unadopt) a device
+      description: Removes the device from the site. If it is online it is reset to factory defaults and must be re-adopted.
       x-destructive: true
       tags: [Integration · Devices]
       responses:
@@ -384,7 +390,7 @@ paths:
     get:
       operationId: listPendingDevices
       summary: List devices pending adoption
-      description: Not site-scoped. Devices on the LAN that are factory-default and visible to this console.
+      description: Not site-scoped. Factory-default devices visible to this console; `adoptionTargetSiteIds` lists the sites each can be adopted into.
       tags: [Integration · Devices]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
@@ -404,7 +410,7 @@ paths:
     get:
       operationId: listConnectedClients
       summary: List connected clients
-      description: Filterable on `id`, `type`, `macAddress`, `ipAddress`, `connectedAt`, `access.type`, `access.authorized`.
+      description: Includes physical clients and active VPN connections. Filterable on `id`, `type`, `macAddress`, `ipAddress`, `connectedAt` (comparisons), `access.type`, `access.authorized`.
       tags: [Integration · Clients]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
@@ -465,7 +471,11 @@ paths:
                 summary: Revoke guest access
                 value: {action: UNAUTHORIZE_GUEST_ACCESS}
       responses:
-        '200': {description: 'Action accepted'}
+        '200':
+          description: Action applied; returns the authorisation revoked and/or granted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ClientActionResponse'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -476,6 +486,7 @@ paths:
     get:
       operationId: listNetworks
       summary: List networks (VLANs)
+      description: Filterable on `management`, `id`, `name` (also `like`), `enabled`, `vlanId` (comparisons), `deviceId`, `metadata.origin`.
       tags: [Integration · Networks]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
@@ -507,6 +518,9 @@ paths:
               vlanOnly:
                 summary: VLAN carried by switches only (no gateway interface)
                 value: {management: UNMANAGED, name: VLAN 99, enabled: true, vlanId: 99}
+              dhcpGuarding:
+                summary: VLAN with DHCP guarding (only listed servers may answer DHCP)
+                value: {management: UNMANAGED, name: VLAN 98, enabled: true, vlanId: 98, dhcpGuarding: {trustedDhcpServerIpAddresses: [192.168.1.1]}}
               gatewayNetwork:
                 summary: Gateway-routed network with DHCP subnet
                 value:
@@ -518,9 +532,18 @@ paths:
                   internetAccessEnabled: true
                   mdnsForwardingEnabled: false
                   zoneId: 7c1e5f2b-3d8a-4e6c-9f1b-2d0a4e3f5a6b
-                  ipv4Configuration: {autoScaleEnabled: false, hostIpAddress: 172.16.30.1, prefixLength: 24}
+                  cellularBackupEnabled: false
+                  ipv4Configuration:
+                    autoScaleEnabled: false
+                    hostIpAddress: 172.16.30.1
+                    prefixLength: 24
+                    dhcpConfiguration:
+                      mode: SERVER
+                      ipAddressRange: {start: 172.16.30.101, stop: 172.16.30.254}
+                      leaseTimeSeconds: 86400
+                      pingConflictDetectionEnabled: true
       responses:
-        '200':
+        '201':
           description: Created
           content:
             application/json:
@@ -604,6 +627,7 @@ paths:
     get:
       operationId: listWifiBroadcasts
       summary: List Wi-Fi broadcasts (SSIDs)
+      description: List items are a summary (type, id, name, enabled, network, security type, device filter); use `getWifiBroadcast` for full settings.
       tags: [Integration · WiFi]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
@@ -630,8 +654,23 @@ paths:
         content:
           application/json:
             schema: {$ref: '#/components/schemas/WifiBroadcastWrite'}
+            examples:
+              iotWpa2:
+                summary: IoT-optimised WPA2 SSID on a specific network (placeholder passphrase)
+                value:
+                  type: IOT_OPTIMIZED
+                  name: example-iot
+                  enabled: true
+                  network: {type: SPECIFIC, networkId: 5d2c9a7e-1f3b-4c6d-8e2a-7b9f0c1d3e4a}
+                  securityConfiguration: {type: WPA2_PERSONAL, passphrase: change-me-placeholder}
+                  multicastToUnicastConversionEnabled: false
+                  clientIsolationEnabled: false
+                  hideName: false
+                  uapsdEnabled: false
+                  channel2gLockedTo6: false
+                  dtimPeriod2gLockedTo3: true
       responses:
-        '200':
+        '201':
           description: Created
           content:
             application/json:
@@ -691,7 +730,7 @@ paths:
     get:
       operationId: listIntegrationFirewallZones
       summary: List firewall zones
-      description: Official equivalent of the controller's `listFirewallZones`.
+      description: Official equivalent of the controller's `listFirewallZones`. Filterable on `id`, `name` (also `like`), `metadata.origin`, `metadata.configurable`.
       tags: [Integration · Firewall]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
@@ -724,14 +763,14 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/FirewallZoneWrite'}
       responses:
-        '200':
+        '201':
           description: Created
           content:
             application/json:
               schema: {$ref: '#/components/schemas/IntegrationFirewallZone'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-  /proxy/network/integration/v1/sites/{siteId}/firewall/zones/{zoneId}:
+  /proxy/network/integration/v1/sites/{siteId}/firewall/zones/{firewallZoneId}:
     parameters:
       - {$ref: '#/components/parameters/SiteId'}
       - {$ref: '#/components/parameters/ZoneId'}
@@ -817,12 +856,31 @@ paths:
                 value:
                   name: Block IoT to Internal
                   enabled: true
-                  action: BLOCK
+                  action: {type: BLOCK}
                   source: {zoneId: 3a6b5f2b-7c1e-4d8a-9e6c-0a2d1b4f3e5a}
                   destination: {zoneId: 9f1b2d0a-4e3f-4a6b-8c1e-5f2b7c3d8a4e}
+                  ipProtocolScope: {ipVersion: IPV4_AND_IPV6}
                   loggingEnabled: true
+              allowIotToHaPort:
+                summary: Allow IoT to reach one host on TCP 8123, new connections only
+                value:
+                  name: Allow IoT to Home Assistant
+                  enabled: true
+                  action: {type: ALLOW, allowReturnTraffic: true}
+                  source: {zoneId: 3a6b5f2b-7c1e-4d8a-9e6c-0a2d1b4f3e5a}
+                  destination:
+                    zoneId: 9f1b2d0a-4e3f-4a6b-8c1e-5f2b7c3d8a4e
+                    trafficFilter:
+                      type: IP_ADDRESS
+                      ipAddressFilter: {type: IP_ADDRESSES, matchOpposite: false, items: [{type: IP_ADDRESS, value: 192.168.1.20}]}
+                      portFilter: {type: PORTS, matchOpposite: false, items: [{type: PORT_NUMBER, value: 8123}]}
+                  ipProtocolScope:
+                    ipVersion: IPV4
+                    protocolFilter: {type: NAMED_PROTOCOL, matchOpposite: false, protocol: {name: tcp}}
+                  connectionStateFilter: [NEW]
+                  loggingEnabled: false
       responses:
-        '200':
+        '201':
           description: Created
           content:
             application/json:
@@ -867,7 +925,8 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
     patch:
       operationId: patchFirewallPolicy
-      summary: Partially update a firewall policy (for example enable/disable)
+      summary: Patch logging and flow reporting on a firewall policy
+      description: Only `loggingEnabled` and `reportFlowEnabled` can be patched. To enable or disable a policy use `updateFirewallPolicy`.
       x-destructive: true
       tags: [Integration · Firewall]
       requestBody:
@@ -878,10 +937,10 @@ paths:
               type: object
               minProperties: 1
               properties:
-                enabled: {type: boolean}
-                loggingEnabled: {type: boolean}
+                loggingEnabled: {type: boolean, description: 'Send matched traffic to remote syslog'}
+                reportFlowEnabled: {type: boolean, description: 'Show matched traffic in Insights Flows'}
             examples:
-              disable: {summary: 'Disable the policy', value: {enabled: false}}
+              logOn: {summary: 'Turn on syslog logging', value: {loggingEnabled: true}}
       responses:
         '200':
           description: Updated
@@ -920,7 +979,7 @@ paths:
     put:
       operationId: updateFirewallPolicyOrdering
       summary: Reorder policies for a zone pair
-      description: Structural change. Must list every user-defined policy ID of the pair.
+      description: Structural change. Must list every user-defined policy ID of the pair, split into those evaluated before and after the system-defined policies.
       x-destructive: true
       tags: [Integration · Firewall]
       requestBody:
@@ -941,7 +1000,7 @@ paths:
     get:
       operationId: listTrafficMatchingLists
       summary: List traffic matching lists (firewall objects)
-      description: Reusable port and IP lists referenced by firewall policies.
+      description: Reusable port and IP lists referenced by firewall policies. Filterable on `id`, `name` (also `like`).
       tags: [Integration · Firewall]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
@@ -969,17 +1028,17 @@ paths:
                 summary: Port list
                 value: {type: PORTS, name: Sonos control, items: [{type: PORT_NUMBER, value: 1400}, {type: PORT_NUMBER_RANGE, start: 3400, stop: 3405}]}
       responses:
-        '200':
+        '201':
           description: Created
           content:
             application/json:
               schema: {$ref: '#/components/schemas/TrafficMatchingList'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-  /proxy/network/integration/v1/sites/{siteId}/traffic-matching-lists/{listId}:
+  /proxy/network/integration/v1/sites/{siteId}/traffic-matching-lists/{trafficMatchingListId}:
     parameters:
       - {$ref: '#/components/parameters/SiteId'}
-      - {name: listId, in: path, required: true, schema: {type: string, format: uuid}}
+      - {name: trafficMatchingListId, in: path, required: true, schema: {type: string, format: uuid}}
     get:
       operationId: getTrafficMatchingList
       summary: Get a traffic matching list
@@ -1029,6 +1088,10 @@ paths:
     get:
       operationId: listAclRules
       summary: List switch ACL rules
+      description: |
+        Filterable on `type`, `id`, `enabled`, `name`, `description`, `action`, `index`, `protocolFilter`, `networkId`,
+        `enforcingDeviceFilter.deviceIds`, `metadata.origin`, and on `sourceFilter.*` / `destinationFilter.*`
+        (`type`, `ipAddressesOrSubnets`, `portFilter`, `networkIds`, `macAddresses`, `prefixLength`).
       tags: [Integration · ACL rules]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
@@ -1053,17 +1116,17 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/AclRuleWrite'}
       responses:
-        '200':
+        '201':
           description: Created
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AclRule'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-  /proxy/network/integration/v1/sites/{siteId}/acl-rules/{ruleId}:
+  /proxy/network/integration/v1/sites/{siteId}/acl-rules/{aclRuleId}:
     parameters:
       - {$ref: '#/components/parameters/SiteId'}
-      - {name: ruleId, in: path, required: true, schema: {type: string, format: uuid}}
+      - {name: aclRuleId, in: path, required: true, schema: {type: string, format: uuid}}
     get:
       operationId: getAclRule
       summary: Get a switch ACL rule
@@ -1137,12 +1200,126 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  # ------------------------------------------------------------------ Switching (read-only)
+  /proxy/network/integration/v1/sites/{siteId}/switching/switch-stacks:
+    parameters: [{$ref: '#/components/parameters/SiteId'}]
+    get:
+      operationId: listSwitchStacks
+      summary: List switch stacks
+      description: Filterable on `id`, `name` (also `like`), `units.id`, `units.macAddress`, `metadata.origin`.
+      tags: [Integration · Switching]
+      parameters:
+        - {$ref: '#/components/parameters/Offset'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Filter'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Page'}
+                  - properties: {data: {type: array, items: {$ref: '#/components/schemas/SwitchStack'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /proxy/network/integration/v1/sites/{siteId}/switching/switch-stacks/{switchStackId}:
+    parameters:
+      - {$ref: '#/components/parameters/SiteId'}
+      - {name: switchStackId, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: getSwitchStack
+      summary: Get a switch stack
+      tags: [Integration · Switching]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SwitchStack'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /proxy/network/integration/v1/sites/{siteId}/switching/mc-lag-domains:
+    parameters: [{$ref: '#/components/parameters/SiteId'}]
+    get:
+      operationId: listMcLagDomains
+      summary: List MC-LAG domains
+      description: Multi-chassis LAG pairs. Filterable on `id`, `name` (also `like`), `peers.deviceId`, `metadata.origin`.
+      tags: [Integration · Switching]
+      parameters:
+        - {$ref: '#/components/parameters/Offset'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Filter'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Page'}
+                  - properties: {data: {type: array, items: {$ref: '#/components/schemas/McLagDomain'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /proxy/network/integration/v1/sites/{siteId}/switching/mc-lag-domains/{mcLagDomainId}:
+    parameters:
+      - {$ref: '#/components/parameters/SiteId'}
+      - {name: mcLagDomainId, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: getMcLagDomain
+      summary: Get an MC-LAG domain
+      tags: [Integration · Switching]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/McLagDomain'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /proxy/network/integration/v1/sites/{siteId}/switching/lags:
+    parameters: [{$ref: '#/components/parameters/SiteId'}]
+    get:
+      operationId: listLags
+      summary: List link aggregation groups (LAGs)
+      description: Filterable on `id`, `type`, `switchStackId`, `mcLagDomainId`, `members.deviceId`, `members.portIdxs`, `metadata.origin`.
+      tags: [Integration · Switching]
+      parameters:
+        - {$ref: '#/components/parameters/Offset'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Filter'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Page'}
+                  - properties: {data: {type: array, items: {$ref: '#/components/schemas/Lag'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /proxy/network/integration/v1/sites/{siteId}/switching/lags/{lagId}:
+    parameters:
+      - {$ref: '#/components/parameters/SiteId'}
+      - {name: lagId, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: getLag
+      summary: Get a LAG
+      tags: [Integration · Switching]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Lag'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
   # ------------------------------------------------------------------ DNS policies
   /proxy/network/integration/v1/sites/{siteId}/dns/policies:
     parameters: [{$ref: '#/components/parameters/SiteId'}]
     get:
       operationId: listDnsPolicies
       summary: List local DNS records and forwarders
+      description: List items are a summary (type, id, enabled, domain). Filterable on every record field, for example `type`, `domain`, `ipv4Address`, `targetDomain`, `ttlSeconds`.
       tags: [Integration · DNS]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
@@ -1169,18 +1346,18 @@ paths:
             examples:
               aRecord:
                 summary: A record
-                value: {type: A, enabled: true, domain: homeassistant.matilda.network, ipv4Address: 192.168.1.20, ttlSeconds: 3600}
+                value: {type: A_RECORD, enabled: true, domain: homeassistant.matilda.network, ipv4Address: 192.168.1.20, ttlSeconds: 14400}
               cname:
                 summary: CNAME record
-                value: {type: CNAME, enabled: true, domain: ha.matilda.network, targetDomain: homeassistant.matilda.network, ttlSeconds: 3600}
+                value: {type: CNAME_RECORD, enabled: true, domain: ha.matilda.network, targetDomain: homeassistant.matilda.network, ttlSeconds: 14400}
               mx:
                 summary: MX record
-                value: {type: MX, enabled: true, domain: example.com, mailServerDomain: mail.example.com, priority: 10, ttlSeconds: 3600}
+                value: {type: MX_RECORD, enabled: true, domain: example.com, mailServerDomain: mail.example.com, priority: 10}
               forward:
                 summary: Forward a domain to another resolver
                 value: {type: FORWARD_DOMAIN, enabled: true, domain: corp.example, ipAddress: 198.51.100.53}
       responses:
-        '200':
+        '201':
           description: Created
           content:
             application/json:
@@ -1239,10 +1416,11 @@ paths:
     get:
       operationId: listVouchers
       summary: List hotspot vouchers
+      description: Note the larger page size than other lists (default 100, maximum 1000).
       tags: [Integration · Hotspot]
       parameters:
         - {$ref: '#/components/parameters/Offset'}
-        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/VoucherLimit'}
         - {$ref: '#/components/parameters/Filter'}
       responses:
         '200':
@@ -1322,7 +1500,14 @@ paths:
       x-destructive: true
       tags: [Integration · Hotspot]
       responses:
-        '200': {description: 'Deleted'}
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  vouchersDeleted: {type: integer, examples: [1]}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
 
@@ -2347,7 +2532,7 @@ components:
       description: Wi-Fi broadcast UUID from `listWifiBroadcasts`.
       schema: {type: string, format: uuid}
     ZoneId:
-      name: zoneId
+      name: firewallZoneId
       in: path
       required: true
       description: Firewall zone UUID from `listIntegrationFirewallZones`.
@@ -2373,29 +2558,55 @@ components:
       name: limit
       in: query
       description: Page size.
-      schema: {type: integer, minimum: 1, maximum: 200, default: 25}
+      schema: {type: integer, minimum: 0, maximum: 200, default: 25}
+    VoucherLimit:
+      name: limit
+      in: query
+      description: Page size for vouchers.
+      schema: {type: integer, minimum: 0, maximum: 1000, default: 100}
     Filter:
       name: filter
       in: query
       description: |
-        Integration API filter expression: `<property>.<function>(<args>)`, combined with `and(...)`, `or(...)`, `not(...)`.
+        Integration API filter expression. Each list operation's description says which properties it can filter on.
 
-        | Function | Meaning |
-        |---|---|
-        | `eq`, `ne` | equal / not equal |
-        | `gt`, `ge`, `lt`, `le` | numeric or date comparisons |
-        | `in`, `notIn` | value in / not in a list |
-        | `like` | wildcard match (`*`) |
-        | `isNull`, `isNotNull` | presence |
-        | `contains`, `containsAny`, `containsAll`, `containsExactly`, `isEmpty` | array properties |
+        **Syntax**
+        - Property: `<property>.<function>(<arguments>)`, arguments comma-separated - `id.eq(123)`, `name.isNotNull()`, `createdAt.in(2025-01-01, 2025-01-05)`
+        - Compound: `and(<expr>, <expr>, ...)`, `or(...)`
+        - Negation: `not(<expr>)` - `not(name.like('guest*'))`
 
-        Strings use single quotes. URL-encode the whole expression.
+        **Value types**
+
+        | Type | Example | Rule |
+        |---|---|---|
+        | STRING | `'Hello, ''World''!'` | Single quotes; double a quote to escape it |
+        | INTEGER / DECIMAL | `123`, `123.321` | Start with a digit |
+        | TIMESTAMP | `2025-01-29`, `2025-01-29T12:39:11Z` | ISO 8601 |
+        | BOOLEAN | `true`, `false` | |
+        | UUID | `550e8400-e29b-41d4-a716-446655440000` | 8-4-4-4-12 |
+        | SET(...) | `[1, 2, 3]` | Unique values |
+
+        **Functions**
+
+        | Function | Args | Applies to |
+        |---|---|---|
+        | `isNull`, `isNotNull` | 0 | all types |
+        | `eq`, `ne` | 1 | STRING, INTEGER, DECIMAL, TIMESTAMP, BOOLEAN, UUID |
+        | `gt`, `ge`, `lt`, `le` | 1 | STRING, INTEGER, DECIMAL, TIMESTAMP, UUID |
+        | `like` | 1 | STRING - `.` = one character, `*` = any run, `\` escapes |
+        | `in`, `notIn` | 1+ | STRING, INTEGER, DECIMAL, TIMESTAMP, UUID |
+        | `isEmpty` | 0 | SET |
+        | `contains` | 1 | SET |
+        | `containsAny`, `containsAll`, `containsExactly` | 1+ | SET |
+
+        URL-encode the whole expression.
       schema: {type: string}
       examples:
         byName: {summary: 'Exact name', value: "name.eq('LAN_IoT')"}
         wildcard: {summary: 'Wildcard', value: "name.like('AP-*')"}
         wirelessGuests: {summary: 'Wireless guests', value: "and(type.eq('WIRELESS'), access.type.eq('GUEST'))"}
         needsUpdate: {summary: 'Devices with firmware updates', value: "firmwareUpdatable.eq(true)"}
+        notGuest: {summary: 'Negation', value: "not(name.like('guest*'))"}
     Force:
       name: force
       in: query
@@ -2431,7 +2642,6 @@ components:
           example:
             statusCode: 400
             statusName: BAD_REQUEST
-            code: api.request.argument-type-mismatch
             message: Invalid filter expression
             timestamp: '2026-10-17T00:00:00Z'
             requestPath: /integration/v1/sites/88f7af54-98f8-306a-a1c7-c9349722b1f6/devices
@@ -2446,8 +2656,8 @@ components:
             statusName: UNAUTHORIZED
             code: api.authentication.missing-credentials
             message: Missing credentials
-            timestamp: '2026-10-17T00:00:00Z'
-            requestPath: /integration/v1/sites
+            timestamp: '2024-11-27T08:13:46.966Z'
+            requestPath: /integration/v1/sites/123
             requestId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
     NotFound:
       description: Resource not found
@@ -2457,7 +2667,6 @@ components:
           example:
             statusCode: 404
             statusName: NOT_FOUND
-            code: api.resource.not-found
             message: Device not found
             timestamp: '2026-10-17T00:00:00Z'
             requestPath: /integration/v1/sites/88f7af54-98f8-306a-a1c7-c9349722b1f6/devices/00000000-0000-0000-0000-000000000000
@@ -2531,7 +2740,7 @@ components:
         message: {type: string}
         timestamp: {type: string, format: date-time}
         requestPath: {type: string}
-        requestId: {type: string, format: uuid, description: 'Quote this when reporting problems'}
+        requestId: {type: string, format: uuid, description: 'On a 500 error this identifies the failure in the console''s server log'}
     Metadata:
       type: object
       readOnly: true
@@ -2539,8 +2748,9 @@ components:
       properties:
         origin:
           type: string
-          enum: [SYSTEM_DEFINED, USER_DEFINED, DERIVED]
+          examples: [SYSTEM_DEFINED, USER_DEFINED]
           description: '`SYSTEM_DEFINED` objects cannot be deleted and have restricted edits.'
+        configurable: {type: boolean, description: 'Firewall zones only - whether the zone can be edited'}
     Page:
       type: object
       description: Integration API page envelope.
@@ -2580,14 +2790,15 @@ components:
         supported: {type: boolean, description: 'False for devices too old for the Integration API'}
         firmwareVersion: {type: string, examples: ['7.1.26']}
         firmwareUpdatable: {type: boolean}
-        features:
-          type: array
-          items: {type: string, enum: [switching, accessPoint, gateway]}
-          examples: [[switching]]
     DeviceSummary:
       allOf:
         - {$ref: '#/components/schemas/DeviceBase'}
         - properties:
+            features:
+              type: array
+              description: Feature groups present; `getDeviceDetails` returns their detail.
+              items: {type: string, examples: [switching, accessPoint]}
+              examples: [[switching]]
             interfaces:
               type: array
               description: Which interface groups `getDeviceDetails` will return.
@@ -2603,28 +2814,34 @@ components:
         state: {type: string, enum: [UP, DOWN, UNKNOWN]}
         connector: {type: string, enum: [RJ45, SFP, SFPPLUS, SFP28, QSFP28]}
         speedMbps: {type: integer, examples: [1000]}
-        maxSpeedMbps: {type: integer, examples: [1000]}
+        maxSpeedMbps: {type: integer, examples: [10000]}
         poe:
           type: object
           properties:
             enabled: {type: boolean}
-            standard: {type: string, enum: [802.3af, 802.3at, 802.3bt]}
-            state: {type: string, enum: [UP, DOWN, LIMITED, UNKNOWN]}
-            type: {type: integer, description: 'PoE type (1-4)'}
+            standard: {type: string, examples: [802.3af, 802.3at, 802.3bt]}
+            state: {type: string, examples: [UP, DOWN]}
+            type: {type: integer, description: 'PoE type (1-4)', examples: [3]}
     DeviceRadio:
       type: object
       properties:
-        frequencyGHz: {type: string, enum: ['2.4', '5', '6', '60']}
+        frequencyGHz: {type: number, description: 'Band in GHz', examples: [2.4, 5, 6]}
         wlanStandard: {type: string, examples: [802.11ax]}
         channel: {type: integer, examples: [36]}
-        channelWidthMHz: {type: integer, enum: [20, 40, 80, 160, 320]}
+        channelWidthMHz: {type: integer, examples: [40, 80]}
     DeviceDetails:
       allOf:
         - {$ref: '#/components/schemas/DeviceBase'}
         - properties:
             adoptedAt: {type: string, format: date-time, readOnly: true}
             provisionedAt: {type: string, format: date-time, readOnly: true}
-            configurationId: {type: string}
+            configurationId: {type: string, examples: [7596498d2f367dc2]}
+            features:
+              type: object
+              description: One key per feature the device has.
+              properties:
+                switching: {$ref: '#/components/schemas/DeviceSwitchingFeature'}
+                accessPoint: {type: object, description: 'No detail is currently returned'}
             uplink:
               type: object
               properties:
@@ -2646,6 +2863,7 @@ components:
         firmwareVersion: {type: string}
         firmwareUpdatable: {type: boolean}
         features: {type: array, items: {type: string}}
+        adoptionTargetSiteIds: {type: array, items: {type: string, format: uuid}, description: 'Sites this device can be adopted into'}
     PendingDevicePage:
       allOf:
         - {$ref: '#/components/schemas/Page'}
@@ -2675,7 +2893,7 @@ components:
               items:
                 type: object
                 properties:
-                  frequencyGHz: {type: string, enum: ['2.4', '5', '6', '60']}
+                  frequencyGHz: {type: number, examples: [2.4, 5]}
                   txRetriesPct: {type: number, description: 'High values (over 15%) suggest interference'}
     DeviceActionRequest:
       type: object
@@ -2723,7 +2941,7 @@ components:
       required: [action]
       properties:
         action: {type: string, const: AUTHORIZE_GUEST_ACCESS}
-        timeLimitMinutes: {type: integer, minimum: 1, maximum: 1000000}
+        timeLimitMinutes: {type: integer, minimum: 1, maximum: 1000000, description: 'Defaults to the site''s guest setting when omitted'}
         dataUsageLimitMBytes: {type: integer, minimum: 1, maximum: 1048576}
         rxRateLimitKbps: {type: integer, minimum: 2, maximum: 100000, description: 'Download limit'}
         txRateLimitKbps: {type: integer, minimum: 2, maximum: 100000, description: 'Upload limit'}
@@ -2732,12 +2950,38 @@ components:
       required: [action]
       properties:
         action: {type: string, const: UNAUTHORIZE_GUEST_ACCESS}
+    GuestAuthorization:
+      type: [object, 'null']
+      properties:
+        authorizedAt: {type: string, format: date-time}
+        authorizationMethod: {type: string, examples: [VOUCHER]}
+        expiresAt: {type: string, format: date-time}
+        dataUsageLimitMBytes: {type: integer}
+        rxRateLimitKbps: {type: integer}
+        txRateLimitKbps: {type: integer}
+        usage:
+          type: object
+          properties:
+            durationSec: {type: integer}
+            rxBytes: {type: integer}
+            txBytes: {type: integer}
+            bytes: {type: integer}
+    ClientActionResponse:
+      type: object
+      properties:
+        action: {type: string, enum: [AUTHORIZE_GUEST_ACCESS, UNAUTHORIZE_GUEST_ACCESS]}
+        revokedAuthorization: {$ref: '#/components/schemas/GuestAuthorization'}
+        grantedAuthorization: {$ref: '#/components/schemas/GuestAuthorization'}
 
     # ================================================================ Integration: networks
     NetworkWrite:
       type: object
       required: [management, name, enabled, vlanId]
-      additionalProperties: true
+      description: |
+        Field set depends on `management`:
+        - `GATEWAY` also requires `ipv4Configuration`, `internetAccessEnabled`, `isolationEnabled` and `cellularBackupEnabled`.
+        - `SWITCH` also requires `deviceId`, `ipv4Configuration`, `isolationEnabled` and `cellularBackupEnabled`.
+        - `UNMANAGED` takes only the common fields.
       properties:
         management:
           type: string
@@ -2748,19 +2992,26 @@ components:
             - `UNMANAGED`: VLAN carried only; no UniFi interface
         name: {type: string, examples: [LAN_IoT]}
         enabled: {type: boolean}
-        vlanId: {type: integer, minimum: 1, maximum: 4009, examples: [20]}
+        vlanId: {type: integer, minimum: 1, maximum: 4009, description: 'Must be 1 for the default network and 2 or higher for others', examples: [20]}
+        dhcpGuarding:
+          type: [object, 'null']
+          description: DHCP guarding - only the listed servers may answer DHCP on this network. Omitted or null disables it.
+          properties:
+            trustedDhcpServerIpAddresses: {type: array, items: {type: string, format: ipv4}}
         isolationEnabled: {type: boolean, description: 'Block traffic to other local networks'}
         cellularBackupEnabled: {type: boolean}
         internetAccessEnabled: {type: boolean}
         mdnsForwardingEnabled: {type: boolean}
-        zoneId: {type: string, format: uuid, description: 'Firewall zone this network belongs to'}
+        zoneId: {type: string, format: uuid, description: 'Firewall zone this network belongs to (`GATEWAY` only)'}
+        deviceId: {type: string, format: uuid, description: 'Layer-3 switch that routes this network (`SWITCH` only)'}
         ipv4Configuration:
-          type: object
-          additionalProperties: true
-          properties:
-            autoScaleEnabled: {type: boolean}
-            hostIpAddress: {type: string, format: ipv4, description: 'Gateway address on this network', examples: [10.88.1.1]}
-            prefixLength: {type: integer, minimum: 8, maximum: 30, examples: [24]}
+          description: Gateway-managed networks add NAT and DHCP-server options (PXE, NTP, WPAD and so on) to the switch-managed set.
+          oneOf:
+            - {$ref: '#/components/schemas/GatewayManagedIPv4Configuration'}
+            - {$ref: '#/components/schemas/SwitchManagedIPv4Configuration'}
+        ipv6Configuration:
+          $ref: '#/components/schemas/NetworkIPv6Configuration'
+          description: '`GATEWAY` only. Omitted or null means IPv6 is not configured.'
     Network:
       allOf:
         - {$ref: '#/components/schemas/NetworkWrite'}
@@ -2781,45 +3032,63 @@ components:
           items:
             type: object
             properties:
-              resourceType: {type: string, examples: [WIFI_BROADCAST, FIREWALL_ZONE]}
+              resourceType: {type: string, examples: [CLIENT, WIFI_BROADCAST, FIREWALL_ZONE]}
               referenceCount: {type: integer}
               references: {type: array, items: {type: object, properties: {referenceId: {type: string, format: uuid}}}}
 
     # ================================================================ Integration: Wi-Fi
     WifiBroadcastWrite:
       type: object
-      required: [type, name, enabled]
-      additionalProperties: true
+      required: [type, name, enabled, securityConfiguration, multicastToUnicastConversionEnabled, clientIsolationEnabled, hideName,
+                 uapsdEnabled, channel2gLockedTo6, dtimPeriod2gLockedTo3]
+      description: |
+        `STANDARD` broadcasts also require `broadcastingFrequenciesGHz`, `arpProxyEnabled`, `bssTransitionEnabled` and
+        `advertiseDeviceName`. The fields from `broadcastingFrequenciesGHz` down apply to `STANDARD` only.
       properties:
         type: {type: string, enum: [STANDARD, IOT_OPTIMIZED]}
         name: {type: string, description: 'SSID', examples: [matilda-iot]}
         enabled: {type: boolean}
-        network:
-          type: object
-          properties:
-            type: {type: string, enum: [NATIVE, SPECIFIC]}
-            networkId: {type: string, format: uuid, description: 'Required when `type` is `SPECIFIC`'}
-        securityConfiguration:
-          type: object
-          additionalProperties: true
-          properties:
-            type: {type: string, enum: [OPEN, WPA2_PERSONAL, WPA3_PERSONAL, WPA2_WPA3_PERSONAL, WPA2_ENTERPRISE, WPA3_ENTERPRISE, WPA2_WPA3_ENTERPRISE]}
-            passphrase: {type: string, format: password, writeOnly: true, minLength: 8, maxLength: 63}
+        network: {$ref: '#/components/schemas/WifiNetworkReference', description: 'Which network the SSID bridges to'}
+        securityConfiguration: {$ref: '#/components/schemas/WifiSecurityConfiguration'}
+        broadcastingDeviceFilter:
+          $ref: '#/components/schemas/WifiBroadcastingDeviceFilter'
+          description: Devices (or device tags) that broadcast this SSID. Null = every access point.
+        mdnsProxyConfiguration: {$ref: '#/components/schemas/WifiMdnsProxyConfiguration'}
+        multicastFilteringPolicy: {$ref: '#/components/schemas/WifiMulticastFilteringPolicy'}
+        multicastToUnicastConversionEnabled: {type: boolean}
+        clientIsolationEnabled: {type: boolean}
+        hideName: {type: boolean}
+        uapsdEnabled: {type: boolean, description: 'Unscheduled Automatic Power Save Delivery (U-APSD)'}
+        channel2gLockedTo6: {type: boolean, default: false, description: 'Lock the 2.4 GHz radio to channel 6 on all broadcasting devices'}
+        dtimPeriod2gLockedTo3: {type: boolean, default: false, description: 'Lock the 2.4 GHz DTIM period to 3'}
+        basicDataRateKbpsByFrequencyGHz:
+          $ref: '#/components/schemas/WifiBasicDataRateConfiguration'
+          description: Minimum (basic) data rate per band, keyed by GHz.
+        clientFilteringPolicy:
+          $ref: '#/components/schemas/WifiClientFilteringPolicy'
+          description: MAC allow/deny list for joining this SSID.
+        blackoutScheduleConfiguration:
+          $ref: '#/components/schemas/WifiBlackoutSchedule'
+          description: Times the SSID is switched off.
         broadcastingFrequenciesGHz:
           type: array
-          items: {type: string, enum: ['2.4', '5', '6']}
-          examples: [['2.4']]
-        hideName: {type: boolean}
-        clientIsolationEnabled: {type: boolean}
-        multicastToUnicastConversionEnabled: {type: boolean}
-        uapsdEnabled: {type: boolean}
-        advertiseDeviceName: {type: boolean, description: 'Required for `STANDARD`'}
-        arpProxyEnabled: {type: boolean, description: 'Required for `STANDARD`'}
-        bssTransitionEnabled: {type: boolean, description: 'Required for `STANDARD` (802.11v)'}
-        broadcastingDeviceFilter:
-          type: object
-          additionalProperties: true
-          description: Limit to specific APs or device tags.
+          minItems: 1
+          uniqueItems: true
+          items: {type: number, enum: [2.4, 5, 6]}
+          examples: [[2.4]]
+        hotspotConfiguration:
+          $ref: '#/components/schemas/WifiHotspotConfiguration'
+          description: Captive portal or Passpoint (guest hotspot).
+        mloEnabled: {type: boolean, description: 'Wi-Fi 7 multi-link operation'}
+        bandSteeringEnabled: {type: boolean}
+        arpProxyEnabled: {type: boolean}
+        bssTransitionEnabled: {type: boolean, description: '802.11v'}
+        advertiseDeviceName: {type: boolean, description: 'Advertise the AP name in beacon frames'}
+        dtimPeriodByFrequencyGHzOverride: {$ref: '#/components/schemas/WifiDtimPeriodConfiguration'}
+        dnsAssistanceConfiguration: {$ref: '#/components/schemas/WifiDnsAssistanceConfiguration'}
+        handoffSuggestionsConfiguration:
+          $ref: '#/components/schemas/WifiHandoffSuggestionsConfiguration'
+          description: Nudge low-signal clients to roam. Null = off.
     WifiBroadcast:
       allOf:
         - {$ref: '#/components/schemas/WifiBroadcastWrite'}
@@ -2837,7 +3106,7 @@ components:
       required: [name, networkIds]
       properties:
         name: {type: string, examples: [IoT]}
-        networkIds: {type: array, items: {type: string, format: uuid}}
+        networkIds: {type: array, items: {type: string, format: uuid}, description: 'Networks assigned to this zone'}
     IntegrationFirewallZone:
       allOf:
         - {$ref: '#/components/schemas/FirewallZoneWrite'}
@@ -2848,37 +3117,29 @@ components:
       allOf:
         - {$ref: '#/components/schemas/Page'}
         - properties: {data: {type: array, items: {$ref: '#/components/schemas/IntegrationFirewallZone'}}}
-    FirewallEndpoint:
-      type: object
-      required: [zoneId]
-      additionalProperties: true
-      properties:
-        zoneId: {type: string, format: uuid}
-        trafficFilter:
-          type: object
-          additionalProperties: true
-          description: Optional narrowing by IP, port, network, MAC, region or application (may reference a traffic matching list).
     FirewallPolicyWrite:
       type: object
-      required: [name, enabled, action, source, destination]
-      additionalProperties: true
+      required: [name, enabled, action, source, destination, ipProtocolScope, loggingEnabled]
       properties:
-        name: {type: string}
+        name: {type: string, minLength: 1, examples: [Block IoT to Internal]}
         description: {type: string}
         enabled: {type: boolean}
-        action: {type: string, enum: [ALLOW, BLOCK, REJECT]}
-        source: {$ref: '#/components/schemas/FirewallEndpoint'}
-        destination: {$ref: '#/components/schemas/FirewallEndpoint'}
-        ipProtocolScope:
-          type: object
-          additionalProperties: true
-          properties:
-            ipVersion: {type: string, enum: [IPV4, IPV6, IPV4_AND_IPV6]}
+        action: {$ref: '#/components/schemas/FirewallPolicyAction'}
+        source: {$ref: '#/components/schemas/FirewallPolicySource'}
+        destination: {$ref: '#/components/schemas/FirewallPolicyDestination'}
+        ipProtocolScope: {$ref: '#/components/schemas/FirewallPolicyIpProtocolScope'}
         connectionStateFilter:
-          type: array
-          items: {type: string, enum: [NEW, ESTABLISHED, RELATED, INVALID]}
-        loggingEnabled: {type: boolean}
-        schedule: {type: object, additionalProperties: true}
+          type: [array, 'null']
+          description: Null matches every state.
+          uniqueItems: true
+          items: {type: string, enum: [NEW, INVALID, ESTABLISHED, RELATED]}
+        ipsecFilter:
+          type: [string, 'null']
+          enum: [MATCH_ENCRYPTED, MATCH_NOT_ENCRYPTED, null]
+          description: Match IPsec-encrypted (or unencrypted) traffic only. Null matches all.
+        loggingEnabled: {type: boolean, description: 'Send matched traffic to remote syslog'}
+        reportFlowEnabled: {type: boolean, default: true, description: 'Show matched traffic in Insights Flows'}
+        schedule: {$ref: '#/components/schemas/FirewallSchedule'}
     FirewallPolicy:
       allOf:
         - {$ref: '#/components/schemas/FirewallPolicyWrite'}
@@ -2893,33 +3154,51 @@ components:
     FirewallPolicyOrdering:
       type: object
       required: [orderedFirewallPolicyIds]
-      additionalProperties: true
       properties:
         orderedFirewallPolicyIds:
-          description: User-defined policy IDs, first evaluated first.
-          type: array
-          items: {type: string, format: uuid}
+          type: object
+          description: User-defined policy IDs in evaluation order, either side of the system-defined policies.
+          properties:
+            beforeSystemDefined: {type: array, items: {type: string, format: uuid}}
+            afterSystemDefined: {type: array, items: {type: string, format: uuid}}
     TrafficMatchingListWrite:
+      description: One variant per list `type`.
+      oneOf:
+        - {$ref: '#/components/schemas/PortTrafficMatchingList'}
+        - {$ref: '#/components/schemas/IPv4TrafficMatchingList'}
+        - {$ref: '#/components/schemas/IPv6TrafficMatchingList'}
+      discriminator:
+        propertyName: type
+        mapping:
+          PORTS: '#/components/schemas/PortTrafficMatchingList'
+          IPV4_ADDRESSES: '#/components/schemas/IPv4TrafficMatchingList'
+          IPV6_ADDRESSES: '#/components/schemas/IPv6TrafficMatchingList'
+    PortTrafficMatchingList:
       type: object
       required: [type, name, items]
-      additionalProperties: true
       properties:
-        type: {type: string, enum: [PORTS, IPV4_ADDRESSES, IPV6_ADDRESSES]}
-        name: {type: string}
-        items:
-          type: array
-          items:
-            type: object
-            additionalProperties: true
-            properties:
-              type: {type: string, examples: [PORT_NUMBER, PORT_NUMBER_RANGE, IP_ADDRESS, SUBNET, IP_ADDRESS_RANGE]}
-              value: {description: 'Single port or address', oneOf: [{type: integer}, {type: string}]}
-              start: {description: 'Range start', oneOf: [{type: integer}, {type: string}]}
-              stop: {description: 'Range end', oneOf: [{type: integer}, {type: string}]}
+        type: {type: string, const: PORTS}
+        name: {type: string, minLength: 1}
+        items: {type: array, minItems: 1, items: {$ref: '#/components/schemas/PortMatching'}}
+    IPv4TrafficMatchingList:
+      type: object
+      required: [type, name, items]
+      properties:
+        type: {type: string, const: IPV4_ADDRESSES}
+        name: {type: string, minLength: 1}
+        items: {type: array, minItems: 1, items: {$ref: '#/components/schemas/IPv4Matching'}}
+    IPv6TrafficMatchingList:
+      type: object
+      required: [type, name, items]
+      properties:
+        type: {type: string, const: IPV6_ADDRESSES}
+        name: {type: string, minLength: 1}
+        items: {type: array, minItems: 1, items: {$ref: '#/components/schemas/IPv6Matching'}}
     TrafficMatchingList:
       allOf:
         - {$ref: '#/components/schemas/TrafficMatchingListWrite'}
-        - properties:
+        - type: object
+          properties:
             id: {type: string, format: uuid, readOnly: true}
     TrafficMatchingListPage:
       allOf:
@@ -2930,18 +3209,30 @@ components:
     AclRuleWrite:
       type: object
       required: [type, name, enabled, action]
-      additionalProperties: true
+      description: '`MAC` rules also require `networkIdFilter`; `protocolFilter` applies to `IPV4` rules only.'
       properties:
         type: {type: string, enum: [IPV4, MAC], description: 'Layer-3 (IP) or layer-2 (MAC) rule'}
-        name: {type: string}
+        name: {type: string, minLength: 1}
         description: {type: string}
         enabled: {type: boolean}
         action: {type: string, enum: [ALLOW, BLOCK]}
-        index: {type: integer, description: 'Position in the rule list'}
-        sourceFilter: {type: object, additionalProperties: true}
-        destinationFilter: {type: object, additionalProperties: true}
-        protocolFilter: {type: array, items: {type: string, examples: [TCP, UDP]}}
-        enforcingDeviceFilter: {type: object, additionalProperties: true, description: 'Which switches enforce the rule'}
+        index: {type: integer, minimum: 0, deprecated: true, description: 'Has no effect - use `updateAclRuleOrdering`'}
+        sourceFilter: {$ref: '#/components/schemas/AclTrafficFilter'}
+        destinationFilter: {$ref: '#/components/schemas/AclTrafficFilter'}
+        protocolFilter:
+          type: [array, 'null']
+          uniqueItems: true
+          description: Null applies to all protocols.
+          items: {type: string, enum: [TCP, UDP]}
+        networkIdFilter: {type: string, format: uuid, description: 'Network the rule applies to (`MAC` rules only)'}
+        enforcingDeviceFilter:
+          $ref: '#/components/schemas/AclEnforcingDeviceFilter'
+          description: Switches that enforce the rule. Null = every switch on the site.
+    AclTrafficFilter:
+      description: '`IPV4` rules take an IP endpoint filter (addresses or subnets, networks, or ports); `MAC` rules take a MAC filter.'
+      oneOf:
+        - {$ref: '#/components/schemas/AclIpEndpointFilter'}
+        - {$ref: '#/components/schemas/AclMacEndpointFilter'}
     AclRule:
       allOf:
         - {$ref: '#/components/schemas/AclRuleWrite'}
@@ -2964,10 +3255,9 @@ components:
       required: [type, enabled, domain]
       additionalProperties: true
       properties:
-        type: {type: string, enum: [A, AAAA, CNAME, MX, TXT, SRV, FORWARD_DOMAIN]}
+        type: {type: string, enum: [A_RECORD, AAAA_RECORD, CNAME_RECORD, MX_RECORD, TXT_RECORD, SRV_RECORD, FORWARD_DOMAIN]}
         enabled: {type: boolean}
-        domain: {type: string, examples: [homeassistant.matilda.network]}
-        ttlSeconds: {type: integer, minimum: 0, examples: [3600]}
+        domain: {type: string, minLength: 1, maxLength: 127, examples: [homeassistant.matilda.network]}
     DnsPolicyWrite:
       description: One variant per record `type`.
       oneOf:
@@ -2981,67 +3271,71 @@ components:
       discriminator:
         propertyName: type
         mapping:
-          A: '#/components/schemas/DnsA'
-          AAAA: '#/components/schemas/DnsAAAA'
-          CNAME: '#/components/schemas/DnsCNAME'
-          MX: '#/components/schemas/DnsMX'
-          TXT: '#/components/schemas/DnsTXT'
-          SRV: '#/components/schemas/DnsSRV'
+          A_RECORD: '#/components/schemas/DnsA'
+          AAAA_RECORD: '#/components/schemas/DnsAAAA'
+          CNAME_RECORD: '#/components/schemas/DnsCNAME'
+          MX_RECORD: '#/components/schemas/DnsMX'
+          TXT_RECORD: '#/components/schemas/DnsTXT'
+          SRV_RECORD: '#/components/schemas/DnsSRV'
           FORWARD_DOMAIN: '#/components/schemas/DnsForwardDomain'
     DnsA:
       allOf:
         - {$ref: '#/components/schemas/DnsPolicyBase'}
-        - required: [ipv4Address]
+        - required: [ipv4Address, ttlSeconds]
           properties:
-            type: {const: A}
-            ipv4Address: {type: string, format: ipv4}
+            type: {const: A_RECORD}
+            ipv4Address: {type: string, format: ipv4, examples: [192.168.1.10]}
+            ttlSeconds: {type: integer, minimum: 0, maximum: 86400, examples: [14400]}
     DnsAAAA:
       allOf:
         - {$ref: '#/components/schemas/DnsPolicyBase'}
-        - required: [ipv6Address]
+        - required: [ipv6Address, ttlSeconds]
           properties:
-            type: {const: AAAA}
+            type: {const: AAAA_RECORD}
             ipv6Address: {type: string, format: ipv6}
+            ttlSeconds: {type: integer, minimum: 0, maximum: 86400, examples: [14400]}
     DnsCNAME:
       allOf:
         - {$ref: '#/components/schemas/DnsPolicyBase'}
-        - required: [targetDomain]
+        - required: [targetDomain, ttlSeconds]
           properties:
-            type: {const: CNAME}
-            targetDomain: {type: string}
+            type: {const: CNAME_RECORD}
+            targetDomain: {type: string, minLength: 1, maxLength: 127}
+            ttlSeconds: {type: integer, minimum: 0, maximum: 604800, examples: [14400]}
     DnsMX:
       allOf:
         - {$ref: '#/components/schemas/DnsPolicyBase'}
         - required: [mailServerDomain, priority]
           properties:
-            type: {const: MX}
-            mailServerDomain: {type: string}
-            priority: {type: integer, minimum: 0}
+            type: {const: MX_RECORD}
+            mailServerDomain: {type: string, minLength: 1, maxLength: 127}
+            priority: {type: integer, minimum: 0, maximum: 65535, description: 'Lower is preferred'}
     DnsTXT:
       allOf:
         - {$ref: '#/components/schemas/DnsPolicyBase'}
         - required: [text]
           properties:
-            type: {const: TXT}
-            text: {type: string}
+            type: {const: TXT_RECORD}
+            text: {type: string, minLength: 1, maxLength: 1024, description: 'Up to four 255-character strings; quote lines containing commas'}
     DnsSRV:
       allOf:
         - {$ref: '#/components/schemas/DnsPolicyBase'}
-        - properties:
-            type: {const: SRV}
-            serverDomain: {type: string}
+        - required: [serverDomain, service, protocol, port, priority, weight]
+          properties:
+            type: {const: SRV_RECORD}
+            serverDomain: {type: string, minLength: 1, maxLength: 127}
             service: {type: string, examples: [_sip]}
             protocol: {type: string, examples: [_tcp]}
-            port: {type: integer, minimum: 1, maximum: 65535}
-            priority: {type: integer, minimum: 0}
-            weight: {type: integer, minimum: 0}
+            port: {type: integer, minimum: 0, maximum: 65535}
+            priority: {type: integer, minimum: 0, maximum: 65535}
+            weight: {type: integer, minimum: 0, maximum: 65535}
     DnsForwardDomain:
       allOf:
         - {$ref: '#/components/schemas/DnsPolicyBase'}
         - required: [ipAddress]
           properties:
             type: {const: FORWARD_DOMAIN}
-            ipAddress: {type: string, description: 'Upstream resolver for this domain'}
+            ipAddress: {type: string, description: 'Upstream resolver (IPv4 or IPv6) for this domain'}
     DnsPolicy:
       allOf:
         - {$ref: '#/components/schemas/DnsPolicyWrite'}
@@ -3060,9 +3354,9 @@ components:
       required: [name, timeLimitMinutes]
       properties:
         count: {type: integer, minimum: 1, maximum: 1000, default: 1}
-        name: {type: string, description: 'Label shown in the UI'}
-        timeLimitMinutes: {type: integer, minimum: 1, maximum: 1000000}
-        authorizedGuestLimit: {type: integer, minimum: 1, description: 'Devices per voucher; omit for unlimited'}
+        name: {type: string, minLength: 1, description: 'Note copied to every generated voucher'}
+        timeLimitMinutes: {type: integer, minimum: 1, maximum: 1000000, description: 'Access time from the first guest''s authorisation; later guests share the same expiry'}
+        authorizedGuestLimit: {type: integer, minimum: 1, description: 'How many different guests can use one voucher; omit for unlimited'}
         dataUsageLimitMBytes: {type: integer, minimum: 1, maximum: 1048576}
         rxRateLimitKbps: {type: integer, minimum: 2, maximum: 100000}
         txRateLimitKbps: {type: integer, minimum: 2, maximum: 100000}
@@ -3081,6 +3375,55 @@ components:
       allOf:
         - {$ref: '#/components/schemas/Page'}
         - properties: {data: {type: array, items: {$ref: '#/components/schemas/Voucher'}}}
+
+    # ================================================================ Integration: switching
+    LagMember:
+      type: object
+      properties:
+        deviceId: {type: string, format: uuid}
+        unitId: {type: integer, description: 'Switch stacks only'}
+        unitMacAddress: {type: string, description: 'Switch stacks only'}
+        portIdxs: {type: array, items: {type: integer}}
+    Lag:
+      type: object
+      additionalProperties: true
+      properties:
+        type: {type: string, enum: [LOCAL, SWITCH_STACK, MULTI_CHASSIS]}
+        id: {type: string, format: uuid}
+        members: {type: array, items: {$ref: '#/components/schemas/LagMember'}}
+        metadata: {$ref: '#/components/schemas/Metadata'}
+    SwitchStack:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        deviceId: {type: string, format: uuid}
+        name: {type: string}
+        units:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: integer}
+              macAddress: {type: string}
+              role: {type: string, examples: [ACTIVE_CONTROLLER]}
+              order: {type: integer}
+        lags: {type: array, items: {$ref: '#/components/schemas/Lag'}}
+        metadata: {$ref: '#/components/schemas/Metadata'}
+    McLagDomain:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        peers:
+          type: array
+          items:
+            type: object
+            properties:
+              role: {type: string, examples: [TOP]}
+              deviceId: {type: string, format: uuid}
+              linkPortIdxs: {type: array, items: {type: integer}}
+        lags: {type: array, items: {$ref: '#/components/schemas/Lag'}}
+        metadata: {$ref: '#/components/schemas/Metadata'}
 
     # ================================================================ Integration: supporting resources
     NamedResource:
@@ -3117,6 +3460,11 @@ components:
                   - {$ref: '#/components/schemas/NamedResource'}
                   - properties:
                       type: {type: string, examples: [IPSEC, OPENVPN, SITE_MAGIC]}
+                      metadata:
+                        type: object
+                        properties:
+                          origin: {type: string}
+                          source: {type: [string, 'null']}
     DeviceTagPage:
       allOf:
         - {$ref: '#/components/schemas/Page'}
@@ -3149,8 +3497,3033 @@ components:
                 type: object
                 properties:
                   id: {type: integer}
-                  name: {type: string, examples: [Streaming Media]}
+                  name: {type: string, examples: [Business tools]}
 
+    # ================================================================ Integration: nested types
+    # Generated from the console's OpenAPI document (UniFi Network 10.6.106).
+    WifiSecurityConfiguration:
+      oneOf:
+      - $ref: '#/components/schemas/WifiOpenSecurity'
+      - $ref: '#/components/schemas/WifiWpa2EnterpriseSecurity'
+      - $ref: '#/components/schemas/WifiWpa2PersonalSecurity'
+      - $ref: '#/components/schemas/WifiWpa2Wpa3EnterpriseSecurity'
+      - $ref: '#/components/schemas/WifiWpa2Wpa3PersonalSecurity'
+      - $ref: '#/components/schemas/WifiWpa3EnterpriseSecurity'
+      - $ref: '#/components/schemas/WifiWpa3PersonalSecurity'
+      discriminator:
+        propertyName: type
+        mapping:
+          OPEN: '#/components/schemas/WifiOpenSecurity'
+          WPA2_ENTERPRISE: '#/components/schemas/WifiWpa2EnterpriseSecurity'
+          WPA2_PERSONAL: '#/components/schemas/WifiWpa2PersonalSecurity'
+          WPA2_WPA3_ENTERPRISE: '#/components/schemas/WifiWpa2Wpa3EnterpriseSecurity'
+          WPA2_WPA3_PERSONAL: '#/components/schemas/WifiWpa2Wpa3PersonalSecurity'
+          WPA3_ENTERPRISE: '#/components/schemas/WifiWpa3EnterpriseSecurity'
+          WPA3_PERSONAL: '#/components/schemas/WifiWpa3PersonalSecurity'
+    WifiNetworkReference:
+      oneOf:
+      - $ref: '#/components/schemas/WifiNativeNetwork'
+      - $ref: '#/components/schemas/WifiSpecificNetwork'
+      discriminator:
+        propertyName: type
+        mapping:
+          NATIVE: '#/components/schemas/WifiNativeNetwork'
+          SPECIFIC: '#/components/schemas/WifiSpecificNetwork'
+    WifiBroadcastingDeviceFilter:
+      oneOf:
+      - $ref: '#/components/schemas/WifiDevicesFilter'
+      - $ref: '#/components/schemas/WifiDeviceTagsFilter'
+      discriminator:
+        propertyName: type
+        mapping:
+          DEVICES: '#/components/schemas/WifiDevicesFilter'
+          DEVICE_TAGS: '#/components/schemas/WifiDeviceTagsFilter'
+    WifiMdnsProxyConfiguration:
+      oneOf:
+      - $ref: '#/components/schemas/WifiMdnsProxyAutoConfiguration'
+      - $ref: '#/components/schemas/WifiMdnsProxyCustomConfiguration'
+      discriminator:
+        propertyName: mode
+        mapping:
+          AUTO: '#/components/schemas/WifiMdnsProxyAutoConfiguration'
+          CUSTOM: '#/components/schemas/WifiMdnsProxyCustomConfiguration'
+    WifiMulticastFilteringPolicy:
+      oneOf:
+      - $ref: '#/components/schemas/WifiMulticastFilteringAllowPolicy'
+      - $ref: '#/components/schemas/WifiMulticastFilteringBlockPolicy'
+      discriminator:
+        propertyName: action
+        mapping:
+          ALLOW: '#/components/schemas/WifiMulticastFilteringAllowPolicy'
+          BLOCK: '#/components/schemas/WifiMulticastFilteringBlockPolicy'
+    WifiBlackoutSchedule:
+      type: object
+      required:
+      - days
+      properties:
+        days:
+          items:
+            $ref: '#/components/schemas/WifiBlackoutScheduleDay'
+          minItems: 1
+          type: array
+    WifiHotspotConfiguration:
+      oneOf:
+      - $ref: '#/components/schemas/WifiCaptivePortal'
+      - $ref: '#/components/schemas/WifiPasspoint'
+      discriminator:
+        propertyName: type
+        mapping:
+          CAPTIVE_PORTAL: '#/components/schemas/WifiCaptivePortal'
+          PASSPOINT: '#/components/schemas/WifiPasspoint'
+    WifiDnsAssistanceConfiguration:
+      oneOf:
+      - $ref: '#/components/schemas/WifiDnsAssistanceAutoConfiguration'
+      - $ref: '#/components/schemas/WifiDnsAssistanceManualConfiguration'
+      discriminator:
+        propertyName: mode
+        mapping:
+          AUTO: '#/components/schemas/WifiDnsAssistanceAutoConfiguration'
+          MANUAL: '#/components/schemas/WifiDnsAssistanceManualConfiguration'
+    WifiBasicDataRateConfiguration:
+      type: object
+      required:
+      - '5'
+      - '2.4'
+      properties:
+        '5':
+          enum:
+          - 6000
+          - 9000
+          - 12000
+          - 24000
+          type: integer
+          examples:
+          - 6000
+        '2.4':
+          enum:
+          - 1000
+          - 2000
+          - 5500
+          - 6000
+          - 9000
+          - 11000
+          - 12000
+          - 24000
+          type: integer
+          examples:
+          - 2000
+    WifiDtimPeriodConfiguration:
+      type: object
+      required:
+      - '5'
+      - '6'
+      - '2.4'
+      properties:
+        '5':
+          maximum: 255
+          minimum: 1
+          type: integer
+        '6':
+          maximum: 255
+          minimum: 1
+          type: integer
+        '2.4':
+          description: DTIM period for 2.4GHz band must be 3 when dtimPeriod2gLockedTo3 is enabled.
+          maximum: 255
+          minimum: 1
+          type: integer
+    WifiClientFilteringPolicy:
+      type: object
+      required:
+      - action
+      - macAddressFilter
+      properties:
+        action:
+          enum:
+          - ALLOW
+          - BLOCK
+          type: string
+        macAddressFilter:
+          items:
+            type: string
+          maxItems: 512
+          minItems: 0
+          type: array
+          uniqueItems: true
+    WifiHandoffSuggestionsConfiguration:
+      type: object
+      properties:
+        band5GHzRssiThreshold:
+          description: RSSI threshold (dBm) for the 5 GHz band. If null, then it is disabled.
+          maximum: -60
+          minimum: -80
+          type: integer
+        band6GHzRssiThreshold:
+          description: RSSI threshold (dBm) for the 6 GHz band. If null, then it is disabled.
+          maximum: -70
+          minimum: -90
+          type: integer
+    FirewallPolicyAction:
+      description: Defines action for matched traffic.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyActionAllow'
+      - $ref: '#/components/schemas/FirewallPolicyActionBlock'
+      - $ref: '#/components/schemas/FirewallPolicyActionReject'
+      discriminator:
+        propertyName: type
+        mapping:
+          ALLOW: '#/components/schemas/FirewallPolicyActionAllow'
+          BLOCK: '#/components/schemas/FirewallPolicyActionBlock'
+          REJECT: '#/components/schemas/FirewallPolicyActionReject'
+    FirewallPolicySource:
+      type: object
+      required:
+      - zoneId
+      properties:
+        trafficFilter:
+          $ref: '#/components/schemas/FirewallPolicySourceTrafficFilter'
+        zoneId:
+          description: ID of the firewall zone from which the matched traffic originates.
+          format: uuid
+          type: string
+    FirewallPolicyDestination:
+      type: object
+      required:
+      - zoneId
+      properties:
+        trafficFilter:
+          $ref: '#/components/schemas/FirewallPolicyDestinationTrafficFilter'
+        zoneId:
+          description: ID of the firewall zone to which the matched traffic is destined.
+          format: uuid
+          type: string
+    FirewallPolicyIpProtocolScope:
+      description: Defines rules for matching by IP version and protocol.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyIpv4ProtocolScope'
+      - $ref: '#/components/schemas/FirewallPolicyIpv4AndIpv6ProtocolScope'
+      - $ref: '#/components/schemas/FirewallPolicyIpv6ProtocolScope'
+      discriminator:
+        propertyName: ipVersion
+        mapping:
+          IPV4: '#/components/schemas/FirewallPolicyIpv4ProtocolScope'
+          IPV4_AND_IPV6: '#/components/schemas/FirewallPolicyIpv4AndIpv6ProtocolScope'
+          IPV6: '#/components/schemas/FirewallPolicyIpv6ProtocolScope'
+    FirewallSchedule:
+      description: Defines date and time when the entity is active. If null, the entity is always active.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallScheduleCustom'
+      - $ref: '#/components/schemas/FirewallScheduleEveryDay'
+      - $ref: '#/components/schemas/FirewallScheduleEveryWeek'
+      - $ref: '#/components/schemas/FirewallScheduleOneTimeOnly'
+      discriminator:
+        propertyName: mode
+        mapping:
+          CUSTOM: '#/components/schemas/FirewallScheduleCustom'
+          EVERY_DAY: '#/components/schemas/FirewallScheduleEveryDay'
+          EVERY_WEEK: '#/components/schemas/FirewallScheduleEveryWeek'
+          ONE_TIME_ONLY: '#/components/schemas/FirewallScheduleOneTimeOnly'
+    AclIpEndpointFilter:
+      oneOf:
+      - $ref: '#/components/schemas/IpAclRuleSubnetEndpointFilter'
+      - $ref: '#/components/schemas/IpAclRuleNetworkEndpointFilter'
+      - $ref: '#/components/schemas/IpAclRulePortEndpointFilter'
+      discriminator:
+        propertyName: type
+        mapping:
+          IP_ADDRESSES_OR_SUBNETS: '#/components/schemas/IpAclRuleSubnetEndpointFilter'
+          NETWORKS: '#/components/schemas/IpAclRuleNetworkEndpointFilter'
+          PORTS: '#/components/schemas/IpAclRulePortEndpointFilter'
+    AclMacEndpointFilter:
+      oneOf:
+      - $ref: '#/components/schemas/MacAclRuleMacAddressEndpointFilter'
+      discriminator:
+        propertyName: type
+        mapping:
+          MAC_ADDRESSES: '#/components/schemas/MacAclRuleMacAddressEndpointFilter'
+    AclEnforcingDeviceFilter:
+      oneOf:
+      - $ref: '#/components/schemas/AclRuleDevicesFilter'
+      discriminator:
+        propertyName: type
+        mapping:
+          DEVICES: '#/components/schemas/AclRuleDevicesFilter'
+    IPv4Matching:
+      oneOf:
+      - $ref: '#/components/schemas/AddressIPv4Matching'
+      - $ref: '#/components/schemas/AddressRangeIPv4Matching'
+      - $ref: '#/components/schemas/SubnetIPv4Matching'
+      discriminator:
+        propertyName: type
+        mapping:
+          IP_ADDRESS: '#/components/schemas/AddressIPv4Matching'
+          IP_ADDRESS_RANGE: '#/components/schemas/AddressRangeIPv4Matching'
+          SUBNET: '#/components/schemas/SubnetIPv4Matching'
+    IPv6Matching:
+      oneOf:
+      - $ref: '#/components/schemas/AddressIPv6Matching'
+      - $ref: '#/components/schemas/SubnetIPv6Matching'
+      discriminator:
+        propertyName: type
+        mapping:
+          IP_ADDRESS: '#/components/schemas/AddressIPv6Matching'
+          SUBNET: '#/components/schemas/SubnetIPv6Matching'
+    PortMatching:
+      oneOf:
+      - $ref: '#/components/schemas/NumberPortMatching'
+      - $ref: '#/components/schemas/NumberRangePortMatching'
+      discriminator:
+        propertyName: type
+        mapping:
+          PORT_NUMBER: '#/components/schemas/NumberPortMatching'
+          PORT_NUMBER_RANGE: '#/components/schemas/NumberRangePortMatching'
+    GatewayManagedIPv4Configuration:
+      type: object
+      required:
+      - autoScaleEnabled
+      - hostIpAddress
+      - prefixLength
+      properties:
+        additionalHostIpSubnets:
+          description: Additional host IP subnets assigned to this VLAN.
+          items:
+            type: string
+          maxItems: 64
+          minItems: 1
+          type: array
+        autoScaleEnabled:
+          description: Whether the Network can automatically scale its subnet size based on the number of active DHCP leases.
+          type: boolean
+        dhcpConfiguration:
+          $ref: '#/components/schemas/GatewayManagedIPv4DHCPConfiguration'
+          description: IPv4 DHCP configuration for this network. If this field is omitted or null, DHCP is not working and hosts must get an address statically or from another server in this broadcast domain.
+        hostIpAddress:
+          type: string
+        natOutboundIpAddressConfiguration:
+          description: List of NAT Outbound Configurations defining which IP addresses are used for NAT translation. This array must contain all WAN interfaces with `static` or `PPPoE` IPv4 connection configuration.
+          items:
+            $ref: '#/components/schemas/WANNATOutboundConfiguration'
+          minItems: 1
+          type: array
+        prefixLength:
+          maximum: 30
+          minimum: 8
+          type: integer
+    SwitchManagedIPv4Configuration:
+      type: object
+      required:
+      - autoScaleEnabled
+      - hostIpAddress
+      - prefixLength
+      properties:
+        additionalHostIpSubnets:
+          description: Additional host IP subnets assigned to this VLAN.
+          items:
+            type: string
+          maxItems: 64
+          minItems: 1
+          type: array
+        autoScaleEnabled:
+          description: Whether the Network can automatically scale its subnet size based on the number of active DHCP leases.
+          type: boolean
+        dhcpConfiguration:
+          $ref: '#/components/schemas/SwitchManagedIPv4DHCPConfiguration'
+          description: IPv4 DHCP configuration for this network. If this field is omitted or null, DHCP is not working and hosts must get an address statically or from another server in this broadcast domain.
+        hostIpAddress:
+          type: string
+        prefixLength:
+          maximum: 30
+          minimum: 8
+          type: integer
+    NetworkIPv6Configuration:
+      oneOf:
+      - $ref: '#/components/schemas/PrefixDelegationIPv6Configuration'
+      - $ref: '#/components/schemas/IPv6StaticConfiguration'
+      discriminator:
+        propertyName: interfaceType
+        mapping:
+          PREFIX_DELEGATION: '#/components/schemas/PrefixDelegationIPv6Configuration'
+          STATIC: '#/components/schemas/IPv6StaticConfiguration'
+    DeviceSwitchingFeature:
+      type: object
+      required:
+      - lags
+      properties:
+        lags:
+          items:
+            $ref: '#/components/schemas/DeviceLocalLag'
+          type: array
+    WifiOpenSecurity:
+      type: object
+      required:
+      - type
+      properties:
+        radiusConfiguration:
+          $ref: '#/components/schemas/WifiNonEnterpriseRadiusConfiguration'
+        type:
+          type: string
+          const: OPEN
+        encryption:
+          description: Encryption mode for open security. If null, plain open with no encryption.
+          enum:
+          - ENHANCED_OPEN
+          - ENHANCED_OPEN_WITH_TRANSITION
+          type: string
+    WifiWpa2EnterpriseSecurity:
+      type: object
+      required:
+      - radiusConfiguration
+      - type
+      - coaEnabled
+      properties:
+        radiusConfiguration:
+          $ref: '#/components/schemas/WifiEnterpriseRadiusConfiguration'
+        type:
+          type: string
+          const: WPA2_ENTERPRISE
+        coaEnabled:
+          description: Indicates whether Change of Authorization (COA) is enabled
+          type: boolean
+        fastRoamingEnabled:
+          description: Fast roaming enabled flag. This feature is not available for IoT configuration.
+          type: boolean
+        groupRekeyIntervalSeconds:
+          description: Group rekey interval in seconds. Sets how often connected device groups are assigned a new key. If null, then it is disabled. This feature is not available for IoT configuration.
+          maximum: 86400
+          minimum: 1
+          type: integer
+        pmfMode:
+          description: Protected Management Frames mode. If null, then it is disabled. This feature is not available for IoT configuration.
+          enum:
+          - REQUIRED
+          - OPTIONAL
+          type: string
+    WifiWpa2PersonalSecurity:
+      type: object
+      required:
+      - type
+      properties:
+        radiusConfiguration:
+          $ref: '#/components/schemas/WifiNonEnterpriseRadiusConfiguration'
+        type:
+          type: string
+          const: WPA2_PERSONAL
+        fastRoamingEnabled:
+          description: Fast roaming enabled flag. This feature is not available for IoT configuration.
+          type: boolean
+        groupRekeyIntervalSeconds:
+          description: Group rekey interval in seconds. Sets how often connected device groups are assigned a new key. If null, then it is disabled. This feature is not available for IoT configuration.
+          maximum: 86400
+          minimum: 1
+          type: integer
+        passphrase:
+          format: password
+          maxLength: 63
+          minLength: 8
+          type: string
+        pmfMode:
+          description: Protected Management Frames mode. If null, then it is disabled. This feature is not available for IoT configuration.
+          enum:
+          - REQUIRED
+          - OPTIONAL
+          type: string
+        presharedKeys:
+          items:
+            $ref: '#/components/schemas/WifiPresharedKey'
+          minItems: 1
+          type: array
+    WifiWpa2Wpa3EnterpriseSecurity:
+      type: object
+      required:
+      - radiusConfiguration
+      - type
+      - coaEnabled
+      - pmfMode
+      - wpa3FastRoamingEnabled
+      properties:
+        radiusConfiguration:
+          $ref: '#/components/schemas/WifiEnterpriseRadiusConfiguration'
+        type:
+          type: string
+          const: WPA2_WPA3_ENTERPRISE
+        coaEnabled:
+          description: Indicates whether Change of Authorization (COA) is enabled
+          type: boolean
+        fastRoamingEnabled:
+          description: Fast roaming enabled flag. This feature is not available for IoT configuration.
+          type: boolean
+        groupRekeyIntervalSeconds:
+          description: Group rekey interval in seconds. Sets how often connected device groups are assigned a new key. If null, then it is disabled. This feature is not available for IoT configuration.
+          maximum: 86400
+          minimum: 1
+          type: integer
+        pmfMode:
+          description: Protected Management Frames mode. If null, then it is disabled. This feature is not available for IoT configuration.
+          enum:
+          - REQUIRED
+          - OPTIONAL
+          type: string
+        wpa3FastRoamingEnabled:
+          description: WPA3 fast roaming can be enabled only if the default fast roaming is enabled
+          type: boolean
+    WifiWpa2Wpa3PersonalSecurity:
+      type: object
+      required:
+      - type
+      - passphrase
+      - pmfMode
+      - saeConfiguration
+      - wpa3FastRoamingEnabled
+      properties:
+        radiusConfiguration:
+          $ref: '#/components/schemas/WifiNonEnterpriseRadiusConfiguration'
+        type:
+          type: string
+          const: WPA2_WPA3_PERSONAL
+        fastRoamingEnabled:
+          description: Fast roaming enabled flag. This feature is not available for IoT configuration.
+          type: boolean
+        groupRekeyIntervalSeconds:
+          description: Group rekey interval in seconds. Sets how often connected device groups are assigned a new key. If null, then it is disabled. This feature is not available for IoT configuration.
+          maximum: 86400
+          minimum: 1
+          type: integer
+        passphrase:
+          format: password
+          maxLength: 63
+          minLength: 8
+          type: string
+        pmfMode:
+          description: Protected Management Frames mode. If null, then it is disabled. This feature is not available for IoT configuration.
+          enum:
+          - REQUIRED
+          - OPTIONAL
+          type: string
+        saeConfiguration:
+          $ref: '#/components/schemas/WifiSaeConfiguration'
+          description: Configuration for SAE (Simultaneous Authentication of Equals).
+        wpa3FastRoamingEnabled:
+          description: WPA3 fast roaming can be enabled only if the default fast roaming is enabled
+          type: boolean
+    WifiWpa3EnterpriseSecurity:
+      type: object
+      required:
+      - radiusConfiguration
+      - type
+      - coaEnabled
+      - securityMode
+      properties:
+        radiusConfiguration:
+          $ref: '#/components/schemas/WifiEnterpriseRadiusConfiguration'
+        type:
+          type: string
+          const: WPA3_ENTERPRISE
+        coaEnabled:
+          description: Indicates whether Change of Authorization (COA) is enabled
+          type: boolean
+        fastRoamingEnabled:
+          description: Fast roaming enabled flag. This feature is not available for IoT configuration.
+          type: boolean
+        groupRekeyIntervalSeconds:
+          description: Group rekey interval in seconds. Sets how often connected device groups are assigned a new key. If null, then it is disabled. This feature is not available for IoT configuration.
+          maximum: 86400
+          minimum: 1
+          type: integer
+        securityMode:
+          enum:
+          - DEFAULT
+          - HIGH_SECURITY_192_BIT
+          type: string
+    WifiWpa3PersonalSecurity:
+      type: object
+      required:
+      - type
+      - passphrase
+      - saeConfiguration
+      properties:
+        radiusConfiguration:
+          $ref: '#/components/schemas/WifiNonEnterpriseRadiusConfiguration'
+        type:
+          type: string
+          const: WPA3_PERSONAL
+        fastRoamingEnabled:
+          description: Fast roaming enabled flag. This feature is not available for IoT configuration.
+          type: boolean
+        groupRekeyIntervalSeconds:
+          description: Group rekey interval in seconds. Sets how often connected device groups are assigned a new key. If null, then it is disabled. This feature is not available for IoT configuration.
+          maximum: 86400
+          minimum: 1
+          type: integer
+        passphrase:
+          format: password
+          maxLength: 63
+          minLength: 8
+          type: string
+        saeConfiguration:
+          $ref: '#/components/schemas/WifiSaeConfiguration'
+          description: Configuration for SAE (Simultaneous Authentication of Equals).
+    WifiNativeNetwork:
+      type: object
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          const: NATIVE
+    WifiSpecificNetwork:
+      type: object
+      required:
+      - type
+      - networkId
+      properties:
+        type:
+          type: string
+          const: SPECIFIC
+        networkId:
+          format: uuid
+          type: string
+    WifiDevicesFilter:
+      type: object
+      required:
+      - type
+      - deviceIds
+      properties:
+        type:
+          type: string
+          const: DEVICES
+        deviceIds:
+          description: List of Access Point capable device IDs to which the WiFi broadcast applies.
+          items:
+            format: uuid
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+    WifiDeviceTagsFilter:
+      type: object
+      required:
+      - type
+      - deviceTagIds
+      properties:
+        type:
+          type: string
+          const: DEVICE_TAGS
+        deviceTagIds:
+          items:
+            format: uuid
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+    WifiMdnsProxyAutoConfiguration:
+      type: object
+      required:
+      - mode
+      properties:
+        mode:
+          type: string
+          const: AUTO
+    WifiMdnsProxyCustomConfiguration:
+      type: object
+      required:
+      - mode
+      - policies
+      properties:
+        mode:
+          type: string
+          const: CUSTOM
+        policies:
+          items:
+            $ref: '#/components/schemas/WifiMdnsProxyPolicy'
+          minItems: 1
+          type: array
+    WifiMulticastFilteringAllowPolicy:
+      type: object
+      required:
+      - action
+      - sourceMacAddressFilter
+      properties:
+        action:
+          type: string
+          const: ALLOW
+        sourceMacAddressFilter:
+          description: List of multicast source MAC addresses allowed. Multicast traffic from gateways is always allowed.
+          items:
+            type: string
+          maxItems: 256
+          minItems: 0
+          type: array
+          uniqueItems: true
+    WifiMulticastFilteringBlockPolicy:
+      type: object
+      required:
+      - action
+      properties:
+        action:
+          type: string
+          const: BLOCK
+    WifiBlackoutScheduleDay:
+      oneOf:
+      - $ref: '#/components/schemas/WifiBlackoutScheduleConfigurationPerAllDay'
+      - $ref: '#/components/schemas/WifiBlackoutScheduleConfigurationPerDayWithTimeRange'
+      discriminator:
+        propertyName: type
+        mapping:
+          ALL_DAY: '#/components/schemas/WifiBlackoutScheduleConfigurationPerAllDay'
+          TIME_RANGE: '#/components/schemas/WifiBlackoutScheduleConfigurationPerDayWithTimeRange'
+    WifiCaptivePortal:
+      type: object
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          const: CAPTIVE_PORTAL
+    WifiPasspoint:
+      type: object
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          const: PASSPOINT
+    WifiDnsAssistanceAutoConfiguration:
+      type: object
+      required:
+      - mode
+      properties:
+        mode:
+          type: string
+          const: AUTO
+    WifiDnsAssistanceManualConfiguration:
+      type: object
+      required:
+      - mode
+      - servers
+      properties:
+        mode:
+          type: string
+          const: MANUAL
+        servers:
+          items:
+            description: Failover DNS servers
+            type: string
+          maxItems: 2
+          minItems: 0
+          type: array
+    FirewallPolicyActionAllow:
+      type: object
+      required:
+      - type
+      - allowReturnTraffic
+      properties:
+        type:
+          type: string
+          const: ALLOW
+        allowReturnTraffic:
+          description: Creates a derived policy for the mirrored firewall zone pair to automatically allow the return traffic.
+          type: boolean
+    FirewallPolicyActionBlock:
+      type: object
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          const: BLOCK
+    FirewallPolicyActionReject:
+      type: object
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          const: REJECT
+    FirewallPolicySourceTrafficFilter:
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicySourceIpv6IidFilter'
+      - $ref: '#/components/schemas/FirewallPolicySourceIpAddressFilter'
+      - $ref: '#/components/schemas/FirewallPolicySourceMacAddressFilter'
+      - $ref: '#/components/schemas/FirewallPolicySourceNetworkFilter'
+      - $ref: '#/components/schemas/FirewallPolicySourcePortFilter'
+      - $ref: '#/components/schemas/FirewallPolicySourceRegionFilter'
+      - $ref: '#/components/schemas/FirewallPolicySourceSiteToSiteVpnTunnelFilter'
+      - $ref: '#/components/schemas/FirewallPolicySourceVpnServerFilter'
+      discriminator:
+        propertyName: type
+        mapping:
+          IPV6_IID: '#/components/schemas/FirewallPolicySourceIpv6IidFilter'
+          IP_ADDRESS: '#/components/schemas/FirewallPolicySourceIpAddressFilter'
+          MAC_ADDRESS: '#/components/schemas/FirewallPolicySourceMacAddressFilter'
+          NETWORK: '#/components/schemas/FirewallPolicySourceNetworkFilter'
+          PORT: '#/components/schemas/FirewallPolicySourcePortFilter'
+          REGION: '#/components/schemas/FirewallPolicySourceRegionFilter'
+          SITE_TO_SITE_VPN_TUNNEL: '#/components/schemas/FirewallPolicySourceSiteToSiteVpnTunnelFilter'
+          VPN_SERVER: '#/components/schemas/FirewallPolicySourceVpnServerFilter'
+    FirewallPolicyDestinationTrafficFilter:
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyDestinationApplicationFilter'
+      - $ref: '#/components/schemas/FirewallPolicyDestinationApplicationCategoryFilter'
+      - $ref: '#/components/schemas/FirewallPolicyDestinationDomainFilter'
+      - $ref: '#/components/schemas/FirewallPolicyDestinationIpv6IidFilter'
+      - $ref: '#/components/schemas/FirewallPolicyDestinationIpAddressFilter'
+      - $ref: '#/components/schemas/FirewallPolicyDestinationNetworkFilter'
+      - $ref: '#/components/schemas/FirewallPolicyDestinationPortFilter'
+      - $ref: '#/components/schemas/FirewallPolicyDestinationRegionFilter'
+      - $ref: '#/components/schemas/FirewallPolicyDestinationSiteToSiteVpnTunnelFilter'
+      - $ref: '#/components/schemas/FirewallPolicyDestinationVpnServerFilter'
+      discriminator:
+        propertyName: type
+        mapping:
+          APPLICATION: '#/components/schemas/FirewallPolicyDestinationApplicationFilter'
+          APPLICATION_CATEGORY: '#/components/schemas/FirewallPolicyDestinationApplicationCategoryFilter'
+          DOMAIN: '#/components/schemas/FirewallPolicyDestinationDomainFilter'
+          IPV6_IID: '#/components/schemas/FirewallPolicyDestinationIpv6IidFilter'
+          IP_ADDRESS: '#/components/schemas/FirewallPolicyDestinationIpAddressFilter'
+          NETWORK: '#/components/schemas/FirewallPolicyDestinationNetworkFilter'
+          PORT: '#/components/schemas/FirewallPolicyDestinationPortFilter'
+          REGION: '#/components/schemas/FirewallPolicyDestinationRegionFilter'
+          SITE_TO_SITE_VPN_TUNNEL: '#/components/schemas/FirewallPolicyDestinationSiteToSiteVpnTunnelFilter'
+          VPN_SERVER: '#/components/schemas/FirewallPolicyDestinationVpnServerFilter'
+    FirewallPolicyIpv4ProtocolScope:
+      type: object
+      required:
+      - ipVersion
+      properties:
+        ipVersion:
+          type: string
+          const: IPV4
+        protocolFilter:
+          $ref: '#/components/schemas/FirewallPolicyIPv4Protocol'
+    FirewallPolicyIpv4AndIpv6ProtocolScope:
+      type: object
+      required:
+      - ipVersion
+      properties:
+        ipVersion:
+          type: string
+          const: IPV4_AND_IPV6
+        protocolFilter:
+          $ref: '#/components/schemas/FirewallPolicyIPv4AndIPv6Protocol'
+    FirewallPolicyIpv6ProtocolScope:
+      type: object
+      required:
+      - ipVersion
+      properties:
+        ipVersion:
+          type: string
+          const: IPV6
+        protocolFilter:
+          $ref: '#/components/schemas/FirewallPolicyIPv6Protocol'
+    FirewallScheduleCustom:
+      type: object
+      required:
+      - mode
+      - repeatOnDays
+      - startDate
+      - stopDate
+      properties:
+        mode:
+          type: string
+          const: CUSTOM
+        repeatOnDays:
+          items:
+            enum:
+            - MONDAY
+            - TUESDAY
+            - WEDNESDAY
+            - THURSDAY
+            - FRIDAY
+            - SATURDAY
+            - SUNDAY
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+        startDate:
+          description: Date in YYYY-MM-DD format. ISO 8601 compliant.
+          format: date
+          type: string
+          examples:
+          - '2025-12-31'
+        stopDate:
+          description: Date in YYYY-MM-DD format. ISO 8601 compliant.
+          format: date
+          type: string
+          examples:
+          - '2025-12-31'
+        timeFilter:
+          $ref: '#/components/schemas/FirewallScheduleTime'
+    FirewallScheduleEveryDay:
+      type: object
+      required:
+      - mode
+      - timeFilter
+      properties:
+        mode:
+          type: string
+          const: EVERY_DAY
+        timeFilter:
+          $ref: '#/components/schemas/FirewallScheduleTime'
+    FirewallScheduleEveryWeek:
+      type: object
+      required:
+      - mode
+      - repeatOnDays
+      properties:
+        mode:
+          type: string
+          const: EVERY_WEEK
+        repeatOnDays:
+          items:
+            enum:
+            - MONDAY
+            - TUESDAY
+            - WEDNESDAY
+            - THURSDAY
+            - FRIDAY
+            - SATURDAY
+            - SUNDAY
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+        timeFilter:
+          $ref: '#/components/schemas/FirewallScheduleTime'
+    FirewallScheduleOneTimeOnly:
+      type: object
+      required:
+      - mode
+      - date
+      - timeFilter
+      properties:
+        mode:
+          type: string
+          const: ONE_TIME_ONLY
+        date:
+          description: Date in YYYY-MM-DD format. ISO 8601 compliant.
+          format: date
+          type: string
+          examples:
+          - '2025-12-31'
+        timeFilter:
+          $ref: '#/components/schemas/FirewallScheduleTime'
+    IpAclRuleSubnetEndpointFilter:
+      type: object
+      required:
+      - type
+      - ipAddressesOrSubnets
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESSES_OR_SUBNETS
+        ipAddressesOrSubnets:
+          description: IP addresses or subnets
+          items:
+            minLength: 1
+            type: string
+          minItems: 1
+          type: array
+        portFilter:
+          description: Ports this ACL rule will be applied to. If null, all the rule will be applied to all ports.
+          items:
+            maximum: 65535
+            minimum: 1
+            type: integer
+          minItems: 1
+          type: array
+          uniqueItems: true
+    IpAclRuleNetworkEndpointFilter:
+      type: object
+      required:
+      - type
+      - networkIds
+      properties:
+        type:
+          type: string
+          const: NETWORKS
+        networkIds:
+          description: Network IDs
+          items:
+            format: uuid
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+        portFilter:
+          description: Ports this ACL rule will be applied to. If null, the rule will be applied to all ports.
+          items:
+            maximum: 65535
+            minimum: 1
+            type: integer
+          minItems: 1
+          type: array
+          uniqueItems: true
+    IpAclRulePortEndpointFilter:
+      type: object
+      required:
+      - type
+      - portFilter
+      properties:
+        type:
+          type: string
+          const: PORTS
+        portFilter:
+          description: Ports this ACL rule will be applied to.
+          items:
+            maximum: 65535
+            minimum: 1
+            type: integer
+          minItems: 1
+          type: array
+          uniqueItems: true
+    MacAclRuleMacAddressEndpointFilter:
+      type: object
+      required:
+      - type
+      - macAddresses
+      properties:
+        type:
+          type: string
+          const: MAC_ADDRESSES
+        macAddresses:
+          description: Source/destination MAC addresses this ACL rule will apply to.
+          items:
+            type: string
+          minItems: 1
+          type: array
+        prefixLength:
+          description: MAC address prefix length. When null, full MAC address(-es) will be used.
+          maximum: 48
+          minimum: 1
+          type: integer
+    AclRuleDevicesFilter:
+      type: object
+      required:
+      - type
+      - deviceIds
+      properties:
+        type:
+          type: string
+          const: DEVICES
+        deviceIds:
+          description: List of Switch capable device IDs to which the ACL rule will be provisioned.
+          items:
+            format: uuid
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+    AddressIPv4Matching:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESS
+        value:
+          description: IPv4 address
+          type: string
+          examples:
+          - 192.168.1.5
+    AddressRangeIPv4Matching:
+      type: object
+      required:
+      - type
+      - start
+      - stop
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESS_RANGE
+        start:
+          description: IPv4 start address
+          type: string
+          examples:
+          - 192.168.1.10
+        stop:
+          description: IPv4 stop address
+          type: string
+          examples:
+          - 192.168.1.20
+    SubnetIPv4Matching:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          const: SUBNET
+        value:
+          description: IPv4 subnet in CIDR notation
+          type: string
+          examples:
+          - 192.168.1.0/24
+    AddressIPv6Matching:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESS
+        value:
+          description: IPv6 address
+          type: string
+          examples:
+          - 2001:0db8:85a3:0000:0000:8a2e:0370:7334
+    SubnetIPv6Matching:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          const: SUBNET
+        value:
+          description: IPv6 subnet in CIDR notation
+          type: string
+          examples:
+          - 2001:db8:1:0::/64
+    NumberPortMatching:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          const: PORT_NUMBER
+        value:
+          description: Port number
+          maximum: 65535
+          minimum: 1
+          type: integer
+    NumberRangePortMatching:
+      type: object
+      required:
+      - type
+      - start
+      - stop
+      properties:
+        type:
+          type: string
+          const: PORT_NUMBER_RANGE
+        start:
+          description: Start port number
+          maximum: 65535
+          minimum: 1
+          type: integer
+        stop:
+          description: Stop port number
+          maximum: 65535
+          minimum: 1
+          type: integer
+    GatewayManagedIPv4DHCPConfiguration:
+      oneOf:
+      - $ref: '#/components/schemas/IPv4DHCPRelayConfiguration'
+      - $ref: '#/components/schemas/GatewayManagedIPv4DHCPServerConfiguration'
+      discriminator:
+        propertyName: mode
+        mapping:
+          RELAY: '#/components/schemas/IPv4DHCPRelayConfiguration'
+          SERVER: '#/components/schemas/GatewayManagedIPv4DHCPServerConfiguration'
+    WANNATOutboundConfiguration:
+      oneOf:
+      - $ref: '#/components/schemas/NATOutboundAutoConfiguration'
+      - $ref: '#/components/schemas/NATOutboundStaticConfiguration'
+      discriminator:
+        propertyName: type
+        mapping:
+          AUTO: '#/components/schemas/NATOutboundAutoConfiguration'
+          STATIC: '#/components/schemas/NATOutboundStaticConfiguration'
+    SwitchManagedIPv4DHCPConfiguration:
+      oneOf:
+      - $ref: '#/components/schemas/IPv4DHCPRelayConfiguration'
+      - $ref: '#/components/schemas/IPv4DHCPServerConfiguration'
+      discriminator:
+        propertyName: mode
+        mapping:
+          RELAY: '#/components/schemas/IPv4DHCPRelayConfiguration'
+          SERVER: '#/components/schemas/IPv4DHCPServerConfiguration'
+    PrefixDelegationIPv6Configuration:
+      type: object
+      required:
+      - clientAddressAssignment
+      - interfaceType
+      - prefixDelegationWanInterfaceId
+      properties:
+        additionalHostIpSubnets:
+          description: Additional host IP subnets assigned to this VLAN.
+          items:
+            type: string
+          maxItems: 4
+          minItems: 1
+          type: array
+        clientAddressAssignment:
+          $ref: '#/components/schemas/IPv6ClientAddressAssignment'
+          description: Client Address Assignment
+        dnsServerIpAddressesOverride:
+          description: The IPv6 DNS server addresses assigned to this Network. If none are specified, they will be selected automatically.
+          items:
+            type: string
+          maxItems: 4
+          minItems: 1
+          type: array
+        interfaceType:
+          type: string
+          const: PREFIX_DELEGATION
+        routerAdvertisement:
+          $ref: '#/components/schemas/RouterAdvertisementConfiguration'
+          description: Router advertisement. Without it, hosts will not autoconfigure addresses and will lack a default route even with DHCPv6.
+        prefixDelegationWanInterfaceId:
+          description: ID of the WAN interface from which the prefix is delegated.
+          format: uuid
+          type: string
+    IPv6StaticConfiguration:
+      type: object
+      required:
+      - clientAddressAssignment
+      - interfaceType
+      - hostIpAddress
+      - prefixLength
+      properties:
+        additionalHostIpSubnets:
+          description: Additional host IP subnets assigned to this VLAN.
+          items:
+            type: string
+          maxItems: 4
+          minItems: 1
+          type: array
+        clientAddressAssignment:
+          $ref: '#/components/schemas/IPv6ClientAddressAssignment'
+          description: Client Address Assignment
+        dnsServerIpAddressesOverride:
+          description: The IPv6 DNS server addresses assigned to this Network. If none are specified, they will be selected automatically.
+          items:
+            type: string
+          maxItems: 4
+          minItems: 1
+          type: array
+        interfaceType:
+          type: string
+          const: STATIC
+        routerAdvertisement:
+          $ref: '#/components/schemas/RouterAdvertisementConfiguration'
+          description: Router advertisement. Without it, hosts will not autoconfigure addresses and will lack a default route even with DHCPv6.
+        hostIpAddress:
+          description: The static IPv6 address assigned to this Network.
+          type: string
+        prefixLength:
+          maximum: 127
+          minimum: 64
+          type: integer
+    DeviceLocalLag:
+      type: object
+      required:
+      - id
+      - metadata
+      - portIdxs
+      properties:
+        id:
+          format: uuid
+          type: string
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+        portIdxs:
+          items:
+            type: integer
+          minItems: 1
+          type: array
+    WifiNonEnterpriseRadiusConfiguration:
+      type: object
+      required:
+      - macAuthenticationConfiguration
+      - nasId
+      - profileId
+      properties:
+        macAuthenticationConfiguration:
+          $ref: '#/components/schemas/WifiRadiusMacAuthenticationConfiguration'
+        nasId:
+          $ref: '#/components/schemas/WifiRadiusNasId'
+        profileId:
+          format: uuid
+          type: string
+    WifiEnterpriseRadiusConfiguration:
+      type: object
+      required:
+      - nasId
+      - profileId
+      properties:
+        macAuthenticationConfiguration:
+          $ref: '#/components/schemas/WifiRadiusMacAuthenticationConfiguration'
+        nasId:
+          $ref: '#/components/schemas/WifiRadiusNasId'
+        profileId:
+          format: uuid
+          type: string
+    WifiPresharedKey:
+      type: object
+      required:
+      - network
+      - passphrase
+      properties:
+        network:
+          $ref: '#/components/schemas/WifiNetworkReference'
+        passphrase:
+          format: password
+          type: string
+    WifiSaeConfiguration:
+      type: object
+      required:
+      - anticloggingThresholdSeconds
+      - syncTimeSeconds
+      properties:
+        anticloggingThresholdSeconds:
+          maximum: 60
+          minimum: 1
+          type: integer
+        syncTimeSeconds:
+          maximum: 60
+          minimum: 1
+          type: integer
+    WifiMdnsProxyPolicy:
+      oneOf:
+      - $ref: '#/components/schemas/WifiMdnsProxyAllowPolicy'
+      - $ref: '#/components/schemas/WifiMdnsProxyBlockPolicy'
+      discriminator:
+        propertyName: action
+        mapping:
+          ALLOW: '#/components/schemas/WifiMdnsProxyAllowPolicy'
+          BLOCK: '#/components/schemas/WifiMdnsProxyBlockPolicy'
+    WifiBlackoutScheduleConfigurationPerAllDay:
+      type: object
+      required:
+      - day
+      - type
+      properties:
+        day:
+          enum:
+          - SUN
+          - MON
+          - TUE
+          - WED
+          - THU
+          - FRI
+          - SAT
+          type: string
+        type:
+          type: string
+          const: ALL_DAY
+    WifiBlackoutScheduleConfigurationPerDayWithTimeRange:
+      type: object
+      required:
+      - day
+      - type
+      - timeRanges
+      properties:
+        day:
+          enum:
+          - SUN
+          - MON
+          - TUE
+          - WED
+          - THU
+          - FRI
+          - SAT
+          type: string
+        type:
+          type: string
+          const: TIME_RANGE
+        timeRanges:
+          items:
+            $ref: '#/components/schemas/WifiBlackoutScheduleConfigurationTimeRange'
+          minItems: 1
+          type: array
+    FirewallPolicySourceIpv6IidFilter:
+      type: object
+      required:
+      - type
+      - ipv6IidFilter
+      properties:
+        type:
+          type: string
+          const: IPV6_IID
+        ipv6IidFilter:
+          $ref: '#/components/schemas/FirewallPolicyIPv6InterfaceIdentifierFilter'
+          description: Match source traffic by IPv6 interface identifier
+        macAddressFilter:
+          description: Match source traffic additionally by a MAC address. If null, match all MAC addresses.
+          type: string
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match source traffic additionally by ports. If null, match all ports.
+    FirewallPolicySourceIpAddressFilter:
+      type: object
+      required:
+      - type
+      - ipAddressFilter
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESS
+        ipAddressFilter:
+          $ref: '#/components/schemas/FirewallPolicyIPAddressFilter'
+          description: Match source traffic by IP addresses
+        macAddressFilter:
+          description: Match source traffic additionally by a MAC address. If null, match all MAC addresses.
+          type: string
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match source traffic additionally by ports. If null, match all ports.
+    FirewallPolicySourceMacAddressFilter:
+      type: object
+      required:
+      - type
+      - macAddressFilter
+      properties:
+        type:
+          type: string
+          const: MAC_ADDRESS
+        macAddressFilter:
+          $ref: '#/components/schemas/FirewallPolicyMACAddressFilter'
+          description: Match source traffic by MAC addresses.
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match source traffic additionally by ports. If null, match all ports.
+    FirewallPolicySourceNetworkFilter:
+      type: object
+      required:
+      - type
+      - networkFilter
+      properties:
+        type:
+          type: string
+          const: NETWORK
+        macAddressFilter:
+          description: Match source traffic additionally by a MAC address. If null, match all MAC addresses.
+          type: string
+        networkFilter:
+          $ref: '#/components/schemas/FirewallPolicyNetworkFilter'
+          description: Match source traffic by networks.
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match source traffic additionally by ports. If null, match all ports.
+    FirewallPolicySourcePortFilter:
+      type: object
+      required:
+      - type
+      - portFilter
+      properties:
+        type:
+          type: string
+          const: PORT
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match source traffic by ports.
+    FirewallPolicySourceRegionFilter:
+      type: object
+      required:
+      - type
+      - regionFilter
+      properties:
+        type:
+          type: string
+          const: REGION
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match source traffic additionally by ports. If null, match all ports.
+        regionFilter:
+          $ref: '#/components/schemas/FirewallPolicyRegionFilter'
+          description: Match source traffic by regions.
+    FirewallPolicySourceSiteToSiteVpnTunnelFilter:
+      type: object
+      required:
+      - type
+      - siteToSiteVpnTunnelFilter
+      properties:
+        type:
+          type: string
+          const: SITE_TO_SITE_VPN_TUNNEL
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match source traffic additionally by ports. If null, match all ports.
+        siteToSiteVpnTunnelFilter:
+          $ref: '#/components/schemas/FirewallPolicySiteToSiteVPNTunnelFilter'
+          description: Match source traffic by site-to-site VPN tunnel.
+    FirewallPolicySourceVpnServerFilter:
+      type: object
+      required:
+      - type
+      - vpnServerFilter
+      properties:
+        type:
+          type: string
+          const: VPN_SERVER
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match source traffic additionally by ports. If null, match all ports.
+        vpnServerFilter:
+          $ref: '#/components/schemas/FirewallPolicyVPNServerFilter'
+          description: Match source traffic by VPN servers.
+    FirewallPolicyDestinationApplicationFilter:
+      type: object
+      required:
+      - type
+      - applicationFilter
+      properties:
+        type:
+          type: string
+          const: APPLICATION
+        applicationFilter:
+          $ref: '#/components/schemas/FirewallPolicyApplicationFilter'
+          description: Match destination traffic by DPI applications.
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic additionally by ports. If null, match all ports.
+    FirewallPolicyDestinationApplicationCategoryFilter:
+      type: object
+      required:
+      - type
+      - applicationCategoryFilter
+      properties:
+        type:
+          type: string
+          const: APPLICATION_CATEGORY
+        applicationCategoryFilter:
+          $ref: '#/components/schemas/FirewallPolicyApplicationCategoryFilter'
+          description: Match destination traffic by DPI application categories.
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic additionally by ports. If null, match all ports.
+    FirewallPolicyDestinationDomainFilter:
+      type: object
+      required:
+      - type
+      - domainFilter
+      properties:
+        type:
+          type: string
+          const: DOMAIN
+        domainFilter:
+          $ref: '#/components/schemas/FirewallPolicyDomainFilter'
+          description: Match destination traffic by domains.
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic additionally by ports. If null, match all ports.
+    FirewallPolicyDestinationIpv6IidFilter:
+      type: object
+      required:
+      - type
+      - ipv6IidFilter
+      properties:
+        type:
+          type: string
+          const: IPV6_IID
+        ipv6IidFilter:
+          $ref: '#/components/schemas/FirewallPolicyIPv6InterfaceIdentifierFilter'
+          description: Match destination traffic by IPv6 interface identifier.
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic additionally by ports. If null, match all ports.
+    FirewallPolicyDestinationIpAddressFilter:
+      type: object
+      required:
+      - type
+      - ipAddressFilter
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESS
+        ipAddressFilter:
+          $ref: '#/components/schemas/FirewallPolicyIPAddressFilter'
+          description: Match destination traffic by IP addresses.
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic additionally by ports. If null, match all ports.
+    FirewallPolicyDestinationNetworkFilter:
+      type: object
+      required:
+      - type
+      - networkFilter
+      properties:
+        type:
+          type: string
+          const: NETWORK
+        networkFilter:
+          $ref: '#/components/schemas/FirewallPolicyNetworkFilter'
+          description: Match destination traffic by networks.
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic additionally by ports. If null, match all ports.
+    FirewallPolicyDestinationPortFilter:
+      type: object
+      required:
+      - type
+      - portFilter
+      properties:
+        type:
+          type: string
+          const: PORT
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic by ports.
+    FirewallPolicyDestinationRegionFilter:
+      type: object
+      required:
+      - type
+      - regionFilter
+      properties:
+        type:
+          type: string
+          const: REGION
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic additionally by ports. If null, match all ports.
+        regionFilter:
+          $ref: '#/components/schemas/FirewallPolicyRegionFilter'
+          description: Match destination traffic by regions.
+    FirewallPolicyDestinationSiteToSiteVpnTunnelFilter:
+      type: object
+      required:
+      - type
+      - siteToSiteVpnTunnelFilter
+      properties:
+        type:
+          type: string
+          const: SITE_TO_SITE_VPN_TUNNEL
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic additionally by ports. If null, match all ports.
+        siteToSiteVpnTunnelFilter:
+          $ref: '#/components/schemas/FirewallPolicySiteToSiteVPNTunnelFilter'
+          description: Match destination traffic by site-to-site VPN tunnel.
+    FirewallPolicyDestinationVpnServerFilter:
+      type: object
+      required:
+      - type
+      - vpnServerFilter
+      properties:
+        type:
+          type: string
+          const: VPN_SERVER
+        portFilter:
+          $ref: '#/components/schemas/FirewallPolicyPortFilter'
+          description: Match destination traffic additionally by ports. If null, match all ports.
+        vpnServerFilter:
+          $ref: '#/components/schemas/FirewallPolicyVPNServerFilter'
+          description: Match destination traffic by VPN servers.
+    FirewallPolicyIPv4Protocol:
+      description: Defines protocol matching. If null, matches all protocols.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyIpv4NamedProtocolFilter'
+      - $ref: '#/components/schemas/FirewallPolicyIpv4ProtocolPresetFilter'
+      - $ref: '#/components/schemas/FirewallPolicyIPv4ProtocolNumber'
+      discriminator:
+        propertyName: type
+        mapping:
+          NAMED_PROTOCOL: '#/components/schemas/FirewallPolicyIpv4NamedProtocolFilter'
+          PRESET: '#/components/schemas/FirewallPolicyIpv4ProtocolPresetFilter'
+          PROTOCOL_NUMBER: '#/components/schemas/FirewallPolicyIPv4ProtocolNumber'
+    FirewallPolicyIPv4AndIPv6Protocol:
+      description: Defines protocol matching. If null, matches all protocols.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyIpv4AndIpv6NamedProtocolFilter'
+      - $ref: '#/components/schemas/FirewallPolicyIpv4AndIpv6ProtocolPresetFilter'
+      - $ref: '#/components/schemas/FirewallPolicyIPv4AndIPv6ProtocolNumber'
+      discriminator:
+        propertyName: type
+        mapping:
+          NAMED_PROTOCOL: '#/components/schemas/FirewallPolicyIpv4AndIpv6NamedProtocolFilter'
+          PRESET: '#/components/schemas/FirewallPolicyIpv4AndIpv6ProtocolPresetFilter'
+          PROTOCOL_NUMBER: '#/components/schemas/FirewallPolicyIPv4AndIPv6ProtocolNumber'
+    FirewallPolicyIPv6Protocol:
+      description: Defines protocol matching. If null, matches all protocols.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyIpv6NamedProtocolFilter'
+      - $ref: '#/components/schemas/FirewallPolicyIpv6ProtocolPresetFilter'
+      - $ref: '#/components/schemas/FirewallPolicyIPv4ProtocolNumber'
+      discriminator:
+        propertyName: type
+        mapping:
+          NAMED_PROTOCOL: '#/components/schemas/FirewallPolicyIpv6NamedProtocolFilter'
+          PRESET: '#/components/schemas/FirewallPolicyIpv6ProtocolPresetFilter'
+          PROTOCOL_NUMBER: '#/components/schemas/FirewallPolicyIPv4ProtocolNumber'
+    FirewallScheduleTime:
+      type: object
+      description: Defines the time range when the entity is active. If null, the entity is active all day.
+      required:
+      - startTime
+      - stopTime
+      properties:
+        startTime:
+          description: Time in HH:MM format. Uses 24-hour clock system. ISO 8601 compliant.
+          type: string
+          examples:
+          - '21:37'
+        stopTime:
+          description: Time in HH:MM format. Uses 24-hour clock system. ISO 8601 compliant.
+          type: string
+          examples:
+          - '21:37'
+    IPv4DHCPRelayConfiguration:
+      type: object
+      required:
+      - mode
+      - dhcpServerIpAddresses
+      properties:
+        mode:
+          type: string
+          const: RELAY
+        dhcpServerIpAddresses:
+          description: DHCP Server IP addresses
+          items:
+            type: string
+          minItems: 1
+          type: array
+    GatewayManagedIPv4DHCPServerConfiguration:
+      type: object
+      required:
+      - mode
+      - ipAddressRange
+      - leaseTimeSeconds
+      - pingConflictDetectionEnabled
+      properties:
+        mode:
+          type: string
+          const: SERVER
+        dnsServerIpAddressesOverride:
+          description: List of DNS servers assigned to client devices by the DHCP server. If none are specified, they will be selected automatically.
+          items:
+            type: string
+          maxItems: 4
+          minItems: 1
+          type: array
+        domainName:
+          description: Domain name that can be used to access network in the browser.
+          type: string
+        gatewayIpAddressOverride:
+          description: Gateway IP address provided to DHCP clients. If null, the default gateway will be assigned.
+          type: string
+        ipAddressRange:
+          $ref: '#/components/schemas/IPAddressRange'
+        leaseTimeSeconds:
+          description: The lease time in seconds for addresses in this range.
+          maximum: 31536000
+          minimum: 0
+          type: integer
+        ntpServerIpAddresses:
+          description: Network Time Protocol (NTP) server IP addresses.
+          items:
+            type: string
+          maxItems: 2
+          minItems: 1
+          type: array
+        option43Value:
+          description: Custom DHCP option (43) — the value MUST be the UniFi Network application's host IP address.
+          type: string
+        pingConflictDetectionEnabled:
+          type: boolean
+        pxeConfiguration:
+          $ref: '#/components/schemas/PXEConfiguration'
+          description: Pre execution environment configuration for network boot
+        tftpServerAddress:
+          description: Trivial File Transfer Protocol (TFTP) server address — accepts a hostname, URL or IP address.
+          type: string
+        timeOffsetSeconds:
+          description: Time offset in seconds from UTC.
+          maximum: 86400
+          minimum: -86400
+          type: integer
+        winsServerIpAddresses:
+          description: Windows Internet Name Service (WINS) server IP addresses.
+          items:
+            type: string
+          maxItems: 2
+          minItems: 1
+          type: array
+        wpadUrl:
+          description: Web Proxy Auto-Discovery (WPAD) URL.
+          type: string
+    NATOutboundAutoConfiguration:
+      type: object
+      required:
+      - type
+      - wanInterfaceId
+      - ipAddressSelectionMode
+      properties:
+        type:
+          type: string
+          const: AUTO
+        wanInterfaceId:
+          format: uuid
+          type: string
+        ipAddressSelectionMode:
+          description: IP address selection mode which determines how the IP address will be selected from the group of IP addresses to translate the traffic on network using NAT.
+          enum:
+          - MAIN
+          - ALL
+          type: string
+    NATOutboundStaticConfiguration:
+      type: object
+      required:
+      - type
+      - wanInterfaceId
+      - ipAddressSelectors
+      properties:
+        type:
+          type: string
+          const: STATIC
+        wanInterfaceId:
+          format: uuid
+          type: string
+        ipAddressSelectors:
+          description: List of IP addresses or address ranges which determines which IP addresses will be used to translate the traffic on network using NAT.
+          items:
+            $ref: '#/components/schemas/IPAddressSelector'
+          minItems: 1
+          type: array
+    IPv4DHCPServerConfiguration:
+      type: object
+      required:
+      - mode
+      - ipAddressRange
+      - leaseTimeSeconds
+      properties:
+        mode:
+          type: string
+          const: SERVER
+        dnsServerIpAddressesOverride:
+          description: List of DNS servers assigned to client devices by the DHCP server. If none are specified, they will be selected automatically.
+          items:
+            type: string
+          maxItems: 4
+          minItems: 1
+          type: array
+        domainName:
+          description: Domain name that can be used to access network in the browser.
+          type: string
+        gatewayIpAddressOverride:
+          description: Gateway IP address provided to DHCP clients. If null, the default gateway will be assigned.
+          type: string
+        ipAddressRange:
+          $ref: '#/components/schemas/IPAddressRange'
+        leaseTimeSeconds:
+          description: The lease time in seconds for addresses in this range.
+          maximum: 31536000
+          minimum: 0
+          type: integer
+    IPv6ClientAddressAssignment:
+      type: object
+      required:
+      - slaacEnabled
+      properties:
+        dhcpConfiguration:
+          $ref: '#/components/schemas/DHCPConfigurationForIPv6Network'
+          description: 'IPv6 DHCP configuration for this network. At least one addressing method must be active: either enable SLAAC or provide DHCP configuration. If this field is null, SLAAC must be enabled.'
+        slaacEnabled:
+          description: 'Allows devices to obtain IPv6 addresses via SLAAC (Stateless Address Autoconfiguration) without DHCPv6. At least one addressing method must be active: either enable SLAAC or provide
+            DHCP configuration.'
+          type: boolean
+    RouterAdvertisementConfiguration:
+      type: object
+      required:
+      - priority
+      properties:
+        priority:
+          description: Router advertisement priority.
+          enum:
+          - LOW
+          - MEDIUM
+          - HIGH
+          type: string
+    WifiRadiusMacAuthenticationConfiguration:
+      type: object
+      required:
+      - macAddressFormat
+      properties:
+        macAddressFormat:
+          enum:
+          - UPPERCASE_NOT_SEPARATED
+          - UPPERCASE_DASH_SEPARATED
+          - UPPERCASE_COLON_SEPARATED
+          - LOWERCASE_NOT_SEPARATED
+          - LOWERCASE_COLON_SEPARATED
+          - LOWERCASE_DASH_SEPARATED
+          type: string
+    WifiRadiusNasId:
+      oneOf:
+      - $ref: '#/components/schemas/WifiDerivedNasId'
+      - $ref: '#/components/schemas/WifiUserDefinedNasId'
+      discriminator:
+        propertyName: type
+        mapping:
+          DERIVED: '#/components/schemas/WifiDerivedNasId'
+          USER_DEFINED: '#/components/schemas/WifiUserDefinedNasId'
+    WifiMdnsProxyAllowPolicy:
+      type: object
+      required:
+      - action
+      properties:
+        action:
+          type: string
+          const: ALLOW
+        deviceFilter:
+          $ref: '#/components/schemas/WifiBroadcastingDeviceFilter'
+          description: Defines the custom scope of devices that will filter Mdns. If null, the mDNS filtering will be added to all Access Point capable devices.
+        bridgingNetworkIds:
+          items:
+            format: uuid
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+        serviceFilter:
+          items:
+            $ref: '#/components/schemas/WifiMdnsService'
+          minItems: 1
+          type: array
+    WifiMdnsProxyBlockPolicy:
+      type: object
+      required:
+      - action
+      properties:
+        action:
+          type: string
+          const: BLOCK
+        deviceFilter:
+          $ref: '#/components/schemas/WifiBroadcastingDeviceFilter'
+          description: Defines the custom scope of devices that will filter Mdns. If null, the mDNS filtering will be added to all Access Point capable devices.
+    WifiBlackoutScheduleConfigurationTimeRange:
+      type: object
+      required:
+      - endTime
+      - startTime
+      properties:
+        endTime:
+          description: End time in 24-hour format (HH:mm)
+          type: string
+        startTime:
+          description: Start time in 24-hour format (HH:mm)
+          type: string
+    FirewallPolicyIPv6InterfaceIdentifierFilter:
+      type: object
+      required:
+      - ipv6Iid
+      - matchOpposite
+      properties:
+        ipv6Iid:
+          description: IPv6 Interface Identifier.
+          minLength: 1
+          type: string
+          examples:
+          - 2001:db8::1/::ffff:ffff:ffff:ffff
+        matchOpposite:
+          description: Match on all IPv6 IIDs except the specified one.
+          type: boolean
+    FirewallPolicyPortFilter:
+      description: Defines rules for matching traffic by port.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyPortValueFilter'
+      - $ref: '#/components/schemas/FirewallPolicyPortReferenceFilter'
+      discriminator:
+        propertyName: type
+        mapping:
+          PORTS: '#/components/schemas/FirewallPolicyPortValueFilter'
+          TRAFFIC_MATCHING_LIST: '#/components/schemas/FirewallPolicyPortReferenceFilter'
+    FirewallPolicyIPAddressFilter:
+      description: Match traffic originating from, or destined to selected IP addresses.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicySpecificIpAddressFilter'
+      - $ref: '#/components/schemas/FirewallPolicyIpAddressTrafficMatchingListFilter'
+      discriminator:
+        propertyName: type
+        mapping:
+          IP_ADDRESSES: '#/components/schemas/FirewallPolicySpecificIpAddressFilter'
+          TRAFFIC_MATCHING_LIST: '#/components/schemas/FirewallPolicyIpAddressTrafficMatchingListFilter'
+    FirewallPolicyMACAddressFilter:
+      type: object
+      required:
+      - macAddresses
+      properties:
+        macAddresses:
+          description: Array of MAC addresses to match.
+          items:
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+    FirewallPolicyNetworkFilter:
+      type: object
+      required:
+      - matchOpposite
+      - networkIds
+      properties:
+        matchOpposite:
+          description: Match on all Networks except the selected.
+          type: boolean
+        networkIds:
+          description: Array of Network IDs to match.
+          items:
+            format: uuid
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+    FirewallPolicyRegionFilter:
+      type: object
+      required:
+      - regions
+      properties:
+        regions:
+          description: Match traffic originating from selected regions. Regions are identified by their ISO 3166-1 alpha-2 country codes.
+          items:
+            enum:
+            - AD
+            - AE
+            - AF
+            - AG
+            - AI
+            - AL
+            - AM
+            - AO
+            - AQ
+            - AR
+            - AS
+            - AT
+            - AU
+            - AW
+            - AX
+            - AZ
+            - BA
+            - BB
+            - BD
+            - BE
+            - BF
+            - BG
+            - BH
+            - BI
+            - BJ
+            - BL
+            - BM
+            - BN
+            - BO
+            - BQ
+            - BR
+            - BS
+            - BT
+            - BW
+            - BY
+            - BZ
+            - CA
+            - CC
+            - CD
+            - CF
+            - CG
+            - CH
+            - CI
+            - CK
+            - CL
+            - CM
+            - CN
+            - CO
+            - CR
+            - CU
+            - CV
+            - CW
+            - CX
+            - CY
+            - CZ
+            - DE
+            - DJ
+            - DK
+            - DM
+            - DO
+            - DZ
+            - EC
+            - EE
+            - EG
+            - EH
+            - ER
+            - ES
+            - ET
+            - FI
+            - FJ
+            - FK
+            - FM
+            - FO
+            - FR
+            - GA
+            - GB
+            - GD
+            - GE
+            - GF
+            - GG
+            - GH
+            - GI
+            - GL
+            - GM
+            - GN
+            - GP
+            - GQ
+            - GR
+            - GS
+            - GT
+            - GU
+            - GW
+            - GY
+            - HK
+            - HN
+            - HR
+            - HT
+            - HU
+            - ID
+            - IE
+            - IL
+            - IM
+            - IN
+            - IO
+            - IQ
+            - IR
+            - IS
+            - IT
+            - JE
+            - JM
+            - JO
+            - JP
+            - KE
+            - KG
+            - KH
+            - KI
+            - KM
+            - KN
+            - KP
+            - KR
+            - KW
+            - KY
+            - KZ
+            - LA
+            - LB
+            - LC
+            - LI
+            - LK
+            - LR
+            - LS
+            - LT
+            - LU
+            - LV
+            - LY
+            - MA
+            - MC
+            - MD
+            - ME
+            - MF
+            - MG
+            - MH
+            - MK
+            - ML
+            - MM
+            - MN
+            - MO
+            - MP
+            - MQ
+            - MR
+            - MS
+            - MT
+            - MU
+            - MV
+            - MW
+            - MX
+            - MY
+            - MZ
+            - NA
+            - NC
+            - NE
+            - NF
+            - NG
+            - NI
+            - NL
+            - 'NO'
+            - NP
+            - NR
+            - NU
+            - NZ
+            - OM
+            - PA
+            - PE
+            - PF
+            - PG
+            - PH
+            - PK
+            - PL
+            - PM
+            - PN
+            - PR
+            - PS
+            - PT
+            - PW
+            - PY
+            - QA
+            - RE
+            - RO
+            - RS
+            - RU
+            - RW
+            - SA
+            - SB
+            - SC
+            - SD
+            - SE
+            - SG
+            - SH
+            - SI
+            - SJ
+            - SK
+            - SL
+            - SM
+            - SN
+            - SO
+            - SR
+            - SS
+            - ST
+            - SV
+            - SX
+            - SY
+            - SZ
+            - TC
+            - TD
+            - TF
+            - TG
+            - TH
+            - TJ
+            - TK
+            - TL
+            - TM
+            - TN
+            - TO
+            - TR
+            - TT
+            - TV
+            - TW
+            - TZ
+            - UA
+            - UG
+            - UM
+            - US
+            - UY
+            - UZ
+            - VA
+            - VC
+            - VE
+            - VG
+            - VI
+            - VN
+            - VU
+            - WF
+            - WS
+            - XK
+            - YE
+            - YT
+            - ZA
+            - ZM
+            - ZW
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+    FirewallPolicySiteToSiteVPNTunnelFilter:
+      type: object
+      required:
+      - siteToSiteVpnTunnelId
+      properties:
+        siteToSiteVpnTunnelId:
+          format: uuid
+          type: string
+    FirewallPolicyVPNServerFilter:
+      type: object
+      required:
+      - matchOpposite
+      - vpnServerIds
+      properties:
+        matchOpposite:
+          type: boolean
+        vpnServerIds:
+          items:
+            format: uuid
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+    FirewallPolicyApplicationFilter:
+      type: object
+      required:
+      - applicationIds
+      properties:
+        applicationIds:
+          description: Array of DPI Application IDs to match.
+          items:
+            type: integer
+          maxItems: 100
+          minItems: 1
+          type: array
+          uniqueItems: true
+    FirewallPolicyApplicationCategoryFilter:
+      type: object
+      required:
+      - applicationCategoryIds
+      properties:
+        applicationCategoryIds:
+          description: Array of DPI Category IDs to match.
+          items:
+            type: integer
+          minItems: 1
+          type: array
+          uniqueItems: true
+    FirewallPolicyDomainFilter:
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicySpecificDomainFilter'
+      discriminator:
+        propertyName: type
+        mapping:
+          DOMAINS: '#/components/schemas/FirewallPolicySpecificDomainFilter'
+    FirewallPolicyIpv4NamedProtocolFilter:
+      type: object
+      required:
+      - type
+      - matchOpposite
+      - protocol
+      properties:
+        type:
+          type: string
+          const: NAMED_PROTOCOL
+        matchOpposite:
+          description: Match on all protocols except the specified protocol.
+          type: boolean
+        protocol:
+          $ref: '#/components/schemas/FirewallPolicyIPv4NamedProtocol'
+    FirewallPolicyIpv4ProtocolPresetFilter:
+      type: object
+      required:
+      - type
+      - preset
+      properties:
+        type:
+          type: string
+          const: PRESET
+        preset:
+          $ref: '#/components/schemas/FirewallPolicyIPv4ProtocolPreset'
+    FirewallPolicyIPv4ProtocolNumber:
+      type: object
+      description: Defines rules for matching by protocol number.
+      required:
+      - type
+      - matchOpposite
+      - protocolNumber
+      properties:
+        type:
+          type: string
+          const: PROTOCOL_NUMBER
+        matchOpposite:
+          description: Match on all protocols except the specified protocol.
+          type: boolean
+        protocolNumber:
+          description: Protocol number as defined by IANA.
+          maximum: 255
+          minimum: 0
+          type: integer
+    FirewallPolicyIpv4AndIpv6NamedProtocolFilter:
+      type: object
+      required:
+      - type
+      - matchOpposite
+      - protocol
+      properties:
+        type:
+          type: string
+          const: NAMED_PROTOCOL
+        matchOpposite:
+          description: Match on all protocols except the specified protocol.
+          type: boolean
+        protocol:
+          $ref: '#/components/schemas/FirewallPolicyIPv4AndIPv6NamedProtocol'
+    FirewallPolicyIpv4AndIpv6ProtocolPresetFilter:
+      type: object
+      required:
+      - type
+      - preset
+      properties:
+        type:
+          type: string
+          const: PRESET
+        preset:
+          $ref: '#/components/schemas/FirewallPolicyIPv4AndIPv6ProtocolPreset'
+    FirewallPolicyIPv4AndIPv6ProtocolNumber:
+      type: object
+      description: Defines rules for matching by protocol number.
+      required:
+      - type
+      - matchOpposite
+      - protocolNumber
+      properties:
+        type:
+          type: string
+          const: PROTOCOL_NUMBER
+        matchOpposite:
+          description: Match on all protocols except the specified protocol.
+          type: boolean
+        protocolNumber:
+          description: Protocol number as defined by IANA.
+          maximum: 255
+          minimum: 0
+          type: integer
+    FirewallPolicyIpv6NamedProtocolFilter:
+      type: object
+      required:
+      - type
+      - matchOpposite
+      - protocol
+      properties:
+        type:
+          type: string
+          const: NAMED_PROTOCOL
+        matchOpposite:
+          description: Match on all protocols except the specified protocol.
+          type: boolean
+        protocol:
+          $ref: '#/components/schemas/FirewallPolicyIPv6NamedProtocol'
+    FirewallPolicyIpv6ProtocolPresetFilter:
+      type: object
+      required:
+      - type
+      - preset
+      properties:
+        type:
+          type: string
+          const: PRESET
+        preset:
+          $ref: '#/components/schemas/FirewallPolicyIPv6ProtocolPreset'
+    IPAddressRange:
+      type: object
+      required:
+      - start
+      - stop
+      properties:
+        start:
+          type: string
+        stop:
+          type: string
+    PXEConfiguration:
+      type: object
+      required:
+      - filename
+      - serverIpAddress
+      properties:
+        filename:
+          minLength: 1
+          type: string
+        serverIpAddress:
+          type: string
+    IPAddressSelector:
+      oneOf:
+      - $ref: '#/components/schemas/IPAddressSelectorSingle'
+      - $ref: '#/components/schemas/IPAddressSelectorRange'
+      discriminator:
+        propertyName: type
+        mapping:
+          IP_ADDRESS: '#/components/schemas/IPAddressSelectorSingle'
+          IP_ADDRESS_RANGE: '#/components/schemas/IPAddressSelectorRange'
+    DHCPConfigurationForIPv6Network:
+      type: object
+      required:
+      - ipAddressSuffixRange
+      - leaseTimeSeconds
+      properties:
+        ipAddressSuffixRange:
+          $ref: '#/components/schemas/Ipv6AddressSuffixRangeSelector'
+        leaseTimeSeconds:
+          description: The lease time in seconds for IP addresses in this range.
+          maximum: 31536000
+          minimum: 0
+          type: integer
+    WifiDerivedNasId:
+      type: object
+      required:
+      - type
+      - source
+      properties:
+        type:
+          type: string
+          const: DERIVED
+        source:
+          enum:
+          - DEVICE_MAC_ADDRESS
+          - DEVICE_NAME
+          - SITE_NAME
+          - BSSID
+          type: string
+    WifiUserDefinedNasId:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          const: USER_DEFINED
+        value:
+          type: string
+    WifiMdnsService:
+      oneOf:
+      - $ref: '#/components/schemas/WifiMdnsProxyCustomService'
+      - $ref: '#/components/schemas/WifiMdnsProxyPredefinedService'
+      discriminator:
+        propertyName: type
+        mapping:
+          CUSTOM: '#/components/schemas/WifiMdnsProxyCustomService'
+          PREDEFINED: '#/components/schemas/WifiMdnsProxyPredefinedService'
+    FirewallPolicyPortValueFilter:
+      type: object
+      required:
+      - matchOpposite
+      - type
+      - items
+      properties:
+        matchOpposite:
+          description: Match on all ports except the specified ones.
+          type: boolean
+        type:
+          type: string
+          const: PORTS
+        items:
+          description: List of ports or port ranges to match.
+          items:
+            $ref: '#/components/schemas/PortMatching'
+          minItems: 1
+          type: array
+          uniqueItems: true
+    FirewallPolicyPortReferenceFilter:
+      type: object
+      required:
+      - matchOpposite
+      - type
+      - trafficMatchingListId
+      properties:
+        matchOpposite:
+          description: Match on all ports except the specified ones.
+          type: boolean
+        type:
+          type: string
+          const: TRAFFIC_MATCHING_LIST
+        trafficMatchingListId:
+          description: ID of Traffic Matching List containing ports to match.
+          format: uuid
+          type: string
+    FirewallPolicySpecificIpAddressFilter:
+      type: object
+      required:
+      - matchOpposite
+      - type
+      - items
+      properties:
+        matchOpposite:
+          description: Match on all IP addresses except the specified ones.
+          type: boolean
+        type:
+          type: string
+          const: IP_ADDRESSES
+        items:
+          description: List of IP addresses, IP address ranges, or IP subnets to match.
+          items:
+            $ref: '#/components/schemas/IPMatching'
+          minItems: 1
+          type: array
+          uniqueItems: true
+    FirewallPolicyIpAddressTrafficMatchingListFilter:
+      type: object
+      required:
+      - matchOpposite
+      - type
+      - trafficMatchingListId
+      properties:
+        matchOpposite:
+          description: Match on all IP addresses except the specified ones.
+          type: boolean
+        type:
+          type: string
+          const: TRAFFIC_MATCHING_LIST
+        trafficMatchingListId:
+          description: ID of Traffic Matching List containing IP addresses to match.
+          format: uuid
+          type: string
+    FirewallPolicySpecificDomainFilter:
+      type: object
+      required:
+      - type
+      - domains
+      properties:
+        type:
+          type: string
+          const: DOMAINS
+        domains:
+          description: List of domains to match.
+          items:
+            type: string
+          minItems: 1
+          type: array
+          uniqueItems: true
+    FirewallPolicyIPv4NamedProtocol:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          enum:
+          - ah
+          - ax.25
+          - dccp
+          - ddp
+          - egp
+          - eigrp
+          - encap
+          - esp
+          - etherip
+          - fc
+          - ggp
+          - gre
+          - hip
+          - hmp
+          - icmp
+          - icmpv6
+          - idpr-cmtp
+          - idrp
+          - igmp
+          - igp
+          - ip
+          - ipcomp
+          - ipencap
+          - ipip
+          - ipv6
+          - ipv6-frag
+          - ipv6-nonxt
+          - ipv6-opts
+          - ipv6-route
+          - isis
+          - iso-tp4
+          - l2tp
+          - manet
+          - mobility-header
+          - mpls-in-ip
+          - ospf
+          - pim
+          - pup
+          - rdp
+          - rohc
+          - rspf
+          - rsvp
+          - sctp
+          - shim6
+          - skip
+          - st
+          - tcp
+          - tcp_udp
+          - udp
+          - udplite
+          - vmtp
+          - vrrp
+          - wesp
+          - xns-idp
+          - xtp
+          type: string
+        typenameFilter:
+          description: Match specific type of ICMP traffic. If null, matches all types. Only when `name` is `icmp`.
+          enum:
+          - ADDRESS_MASK_REPLY
+          - ADDRESS_MASK_REQUEST
+          - COMMUNICATION_PROHIBITED
+          - DESTINATION_UNREACHABLE
+          - ECHO_REPLY
+          - ECHO_REQUEST
+          - FRAGMENTATION_NEEDED
+          - HOST_PRECEDENCE_VIOLATION
+          - HOST_PROHIBITED
+          - HOST_REDIRECT
+          - HOST_UNKNOWN
+          - HOST_UNREACHABLE
+          - IP_HEADER_BAD
+          - NETWORK_PROHIBITED
+          - NETWORK_REDIRECT
+          - NETWORK_UNKNOWN
+          - NETWORK_UNREACHABLE
+          - PARAMETER_PROBLEM
+          - PORT_UNREACHABLE
+          - PRECEDENCE_CUTOFF
+          - PROTOCOL_UNREACHABLE
+          - REDIRECT
+          - REQUIRED_OPTION_MISSING
+          - ROUTER_ADVERTISEMENT
+          - ROUTER_SOLICITATION
+          - SOURCE_QUENCH
+          - SOURCE_ROUTE_FAILED
+          - TIME_EXCEEDED
+          - TIMESTAMP_REPLY
+          - TIMESTAMP_REQUEST
+          - TOS_HOST_REDIRECT
+          - TOS_HOST_UNREACHABLE
+          - TOS_NETWORK_REDIRECT
+          - TOS_NETWORK_UNREACHABLE
+          - TTL_ZERO_DURING_REASSEMBLY
+          - TTL_ZERO_DURING_TRANSIT
+          type: string
+      description: Defines rules for matching by protocol name.
+    FirewallPolicyIPv4ProtocolPreset:
+      description: Defines rules for matching by protocol preset.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyIpv4ProtocolPresetTcpUdp'
+      discriminator:
+        propertyName: name
+        mapping:
+          TCP_UDP: '#/components/schemas/FirewallPolicyIpv4ProtocolPresetTcpUdp'
+    FirewallPolicyIPv4AndIPv6NamedProtocol:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          enum:
+          - ah
+          - ax.25
+          - dccp
+          - ddp
+          - egp
+          - eigrp
+          - encap
+          - esp
+          - etherip
+          - fc
+          - ggp
+          - gre
+          - hip
+          - hmp
+          - icmp
+          - icmpv6
+          - idpr-cmtp
+          - idrp
+          - igmp
+          - igp
+          - ip
+          - ipcomp
+          - ipencap
+          - ipip
+          - ipv6
+          - ipv6-frag
+          - ipv6-nonxt
+          - ipv6-opts
+          - ipv6-route
+          - isis
+          - iso-tp4
+          - l2tp
+          - manet
+          - mobility-header
+          - mpls-in-ip
+          - ospf
+          - pim
+          - pup
+          - rdp
+          - rohc
+          - rspf
+          - rsvp
+          - sctp
+          - shim6
+          - skip
+          - st
+          - tcp
+          - tcp_udp
+          - udp
+          - udplite
+          - vmtp
+          - vrrp
+          - wesp
+          - xns-idp
+          - xtp
+          type: string
+      description: Defines rules for matching by protocol name.
+    FirewallPolicyIPv4AndIPv6ProtocolPreset:
+      description: Defines rules for matching by protocol preset.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyIpv4AndIpv6ProtocolPresetTcpUdp'
+      discriminator:
+        propertyName: name
+        mapping:
+          TCP_UDP: '#/components/schemas/FirewallPolicyIpv4AndIpv6ProtocolPresetTcpUdp'
+    FirewallPolicyIPv6NamedProtocol:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          enum:
+          - ah
+          - ax.25
+          - dccp
+          - ddp
+          - egp
+          - eigrp
+          - encap
+          - esp
+          - etherip
+          - fc
+          - ggp
+          - gre
+          - hip
+          - hmp
+          - icmp
+          - icmpv6
+          - idpr-cmtp
+          - idrp
+          - igmp
+          - igp
+          - ip
+          - ipcomp
+          - ipencap
+          - ipip
+          - ipv6
+          - ipv6-frag
+          - ipv6-nonxt
+          - ipv6-opts
+          - ipv6-route
+          - isis
+          - iso-tp4
+          - l2tp
+          - manet
+          - mobility-header
+          - mpls-in-ip
+          - ospf
+          - pim
+          - pup
+          - rdp
+          - rohc
+          - rspf
+          - rsvp
+          - sctp
+          - shim6
+          - skip
+          - st
+          - tcp
+          - tcp_udp
+          - udp
+          - udplite
+          - vmtp
+          - vrrp
+          - wesp
+          - xns-idp
+          - xtp
+          type: string
+        typenameFilter:
+          description: Match specific type of ICMPv6 traffic. If null, matches all types. Only when `name` is `icmpv6`.
+          enum:
+          - ADDRESS_UNREACHABLE
+          - BAD_HEADER
+          - BEYOND_SCOPE
+          - COMMUNICATION_PROHIBITED
+          - DESTINATION_UNREACHABLE
+          - ECHO_REPLY
+          - ECHO_REQUEST
+          - FAILED_POLICY
+          - NEIGHBOR_ADVERTISEMENT
+          - NEIGHBOR_SOLICITATION
+          - NO_ROUTE
+          - PACKET_TOO_BIG
+          - PARAMETER_PROBLEM
+          - PORT_UNREACHABLE
+          - REDIRECT
+          - REJECT_ROUTE
+          - ROUTER_ADVERTISEMENT
+          - ROUTER_SOLICITATION
+          - TIME_EXCEEDED
+          - TTL_ZERO_DURING_REASSEMBLY
+          - TTL_ZERO_DURING_TRANSIT
+          - UNKNOWN_HEADER_TYPE
+          - UNKNOWN_OPTION
+          type: string
+      description: Defines rules for matching by protocol name.
+    FirewallPolicyIPv6ProtocolPreset:
+      description: Defines rules for matching by protocol preset.
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyIpv6ProtocolPresetTcpUdp'
+      discriminator:
+        propertyName: name
+        mapping:
+          TCP_UDP: '#/components/schemas/FirewallPolicyIpv6ProtocolPresetTcpUdp'
+    IPAddressSelectorSingle:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESS
+        value:
+          type: string
+    IPAddressSelectorRange:
+      type: object
+      required:
+      - type
+      - start
+      - stop
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESS_RANGE
+        start:
+          type: string
+        stop:
+          type: string
+    Ipv6AddressSuffixRangeSelector:
+      type: object
+      required:
+      - start
+      - stop
+      properties:
+        start:
+          description: Start suffix of the DHCPv6 address pool.
+          type: string
+        stop:
+          description: End suffix of the DHCPv6 address pool.
+          type: string
+    WifiMdnsProxyCustomService:
+      type: object
+      required:
+      - type
+      - name
+      - typeDomain
+      properties:
+        type:
+          type: string
+          const: CUSTOM
+        name:
+          minLength: 1
+          type: string
+        typeDomain:
+          minLength: 1
+          type: string
+    WifiMdnsProxyPredefinedService:
+      type: object
+      required:
+      - type
+      - name
+      properties:
+        type:
+          type: string
+          const: PREDEFINED
+        name:
+          enum:
+          - AMAZON_DEVICES
+          - ANDROID_TV_REMOTE
+          - APPLE_AIR_DROP
+          - APPLE_AIR_PLAY
+          - APPLE_FILE_SHARING
+          - APPLE_ICHAT
+          - APPLE_ITUNES
+          - AQARA
+          - BOSE
+          - DNS_SERVICE_DISCOVERY
+          - FTP_SERVERS
+          - GOOGLE_CHROMECAST
+          - HOMEKIT
+          - MATTER_NETWORK
+          - PHILIPS_HUE
+          - PRINTERS
+          - ROKU
+          - SCANNERS
+          - SHELLY
+          - SONOS
+          - SPOTIFY_CONNECT
+          - SSH_SERVERS
+          - TIME_CAPSULE
+          - WEB_SERVERS
+          - WINDOWS_FILE_SHARING_SAMBA
+          type: string
+    IPMatching:
+      oneOf:
+      - $ref: '#/components/schemas/FirewallPolicyIpMatchingIpAddress'
+      - $ref: '#/components/schemas/FirewallPolicyIpMatchingRange'
+      - $ref: '#/components/schemas/FirewallPolicyIpMatchingSubnet'
+      discriminator:
+        propertyName: type
+        mapping:
+          IP_ADDRESS: '#/components/schemas/FirewallPolicyIpMatchingIpAddress'
+          IP_ADDRESS_RANGE: '#/components/schemas/FirewallPolicyIpMatchingRange'
+          SUBNET: '#/components/schemas/FirewallPolicyIpMatchingSubnet'
+    FirewallPolicyIpv4ProtocolPresetTcpUdp:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          const: TCP_UDP
+    FirewallPolicyIpv4AndIpv6ProtocolPresetTcpUdp:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          const: TCP_UDP
+    FirewallPolicyIpv6ProtocolPresetTcpUdp:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          const: TCP_UDP
+    FirewallPolicyIpMatchingIpAddress:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESS
+        value:
+          description: IP address to match.
+          type: string
+    FirewallPolicyIpMatchingRange:
+      type: object
+      required:
+      - type
+      - start
+      - stop
+      properties:
+        type:
+          type: string
+          const: IP_ADDRESS_RANGE
+        start:
+          description: First IP address from range to match.
+          type: string
+        stop:
+          description: Last IP address from range to match.
+          type: string
+    FirewallPolicyIpMatchingSubnet:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          const: SUBNET
+        value:
+          description: IP subnet in CIDR notation to match.
+          type: string
     # ================================================================ Controller API
     LegacyEnvelope:
       type: object
