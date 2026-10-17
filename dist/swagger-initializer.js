@@ -8,6 +8,11 @@ window.onload = function() {
     deepLinking: true,
     docExpansion: "list",
     filter: true,
+    // Show vendor extensions (x-destructive) and parameter constraints under each operation
+    showExtensions: true,
+    showCommonExtensions: true,
+    displayOperationId: true,
+    defaultModelsExpandDepth: 0,
     // Static reference only: the console is on a private LAN with a
     // self-signed certificate, so Try-it-out from a hosted page cannot work.
     supportedSubmitMethods: [],
