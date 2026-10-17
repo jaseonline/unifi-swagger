@@ -1740,8 +1740,8 @@ paths:
     parameters: [{$ref: '#/components/parameters/Site'}]
     post:
       operationId: backupCommand
-      summary: Backup command (list backups)
-      description: Read-only despite using POST.
+      summary: List Network application backups
+      description: Read-only despite using POST. For console-level (UniFi OS) backups see `listConsoleBackups`.
       tags: [Controller · System]
       security: [{ControllerSession: [], CsrfToken: []}]
       requestBody:
@@ -1761,8 +1761,10 @@ paths:
     parameters: [{$ref: '#/components/parameters/Site'}]
     post:
       operationId: systemCommand
-      summary: Create a controller backup
-      description: Take one before any structural change. Returns the backup file URL in `data[0].url`.
+      summary: Create a Network application backup
+      description: |
+        Network application settings only (plus statistics if `days` is set). Take one before any structural change.
+        Returns the backup file URL in `data[0].url`. For a whole-console backup use `createConsoleBackup`.
       tags: [Controller · System]
       security: [{ControllerSession: [], CsrfToken: []}]
       requestBody:
@@ -2229,18 +2231,96 @@ paths:
       responses:
         '200': {description: 'OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}'}
         '401': {$ref: '#/components/responses/LegacyUnauthorized'}
-  /api/backup/download:
+  /api/backup/now:
+    post:
+      operationId: createConsoleBackup
+      summary: Create a console (UniFi OS) backup now
+      description: |
+        Same as *Settings > Control Plane > Backups > Create Backup* in the console UI. Covers the whole console,
+        not just the Network application. Sent with an empty body (`Content-Length: 0`).
+        Returns no body; the new entry appears at the top of `listConsoleBackups` with the schedule's `frequency`
+        (for example `WEEKLY`), not a separate manual label.
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      parameters:
+        - name: destination
+          in: query
+          required: true
+          description: Where to store the backup. Only `local` (on the console) has been observed.
+          schema: {type: string, examples: [local]}
+      responses:
+        '204': {description: 'Backup created'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+        '403': {description: 'Missing or stale `X-CSRF-Token`'}
+  /api/backup/local/list:
     get:
-      operationId: downloadBackup
-      summary: Download a console backup
-      description: Treat the file as sensitive (contains configuration and credentials). Store it in Keeper or encrypted storage only.
+      operationId: listConsoleBackups
+      summary: List console (UniFi OS) backups stored on the console
+      description: Newest first. Each entry records the console firmware and the version of every application and service it covers.
       tags: [UniFi OS · System]
       security: [{ControllerSession: []}]
       responses:
         '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/ConsoleBackup'}}
+              example:
+                - id: 3f2b6c1e-8a4d-4e7f-9b0c-1d2e3f4a5b6c
+                  time: 1792205209266
+                  frequency: WEEKLY
+                  size: 1055377
+                  metadata:
+                    controllers: {network: {size: 520, version: 11.0.81-37038-1, success: true}}
+                    services: {users: {size: 548, version: 1.14.7+19, success: true}}
+                    firmware_version: 6.0.11
+                    hardware_shortname: UCKP
+                    id: 3f2b6c1e-8a4d-4e7f-9b0c-1d2e3f4a5b6c
+                    mac: 00005E005301
+                    owner_id: 9c8b7a6f-5e4d-4c3b-2a1f-0e9d8c7b6a5f
+                    timezone: Europe/London
+                    created_at: 1792205209266
+                    frequency: WEEKLY
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/backup/download:
+    get:
+      operationId: downloadBackup
+      summary: Download a console backup
+      description: |
+        Builds and returns a fresh archive at request time (the file name's timestamp and ID do not match any entry in
+        `listConsoleBackups`). Without `target` it is *Backup for All Applications and Settings*.
+        Treat the file as sensitive (contains configuration and credentials). Store it in Keeper or encrypted storage only.
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: []}]
+      parameters:
+        - name: target
+          in: query
+          required: false
+          description: |
+            Limit the archive to one part. Omit for everything.
+            - `uos`: UniFi OS settings
+            - `network`: Network application
+            - `users`: users and permissions
+          schema: {type: string, enum: [uos, network, users]}
+      responses:
+        '200':
           description: Backup archive
           headers:
-            Content-Disposition: {schema: {type: string, examples: ['attachment; filename="backup.unifi"']}}
+            Filename:
+              description: |
+                Archive file name (sent instead of `Content-Disposition`). The pattern depends on `target`:
+                - none: `unifi_os_backup_<epoch ms>_<uuid>.unifi`
+                - `uos`: `unifi_os_backup_for_uos_<epoch ms>_<8 hex>.unifi`
+                - `users`: `unifi_os_backup_for_users_<epoch ms>_<8 hex>.unifi`
+                - `network`: `network_backup_<MM.DD.YYYY>_<hh-mm-AM|PM>_v<Network version>.unf`, the same `.unf` format
+                  as a Network application backup (restorable through the Network app)
+              schema:
+                type: string
+                examples:
+                  - unifi_os_backup_1792206701678_3f2b6c1e-8a4d-4e7f-9b0c-1d2e3f4a5b6c.unifi
+                  - unifi_os_backup_for_uos_1792206755073_1a2b3c4d.unifi
+                  - network_backup_10.17.2026_03-12-AM_v11.0.81.unf
+                  - unifi_os_backup_for_users_1792206778878_5e6f7a8b.unifi
           content:
             application/octet-stream:
               schema: {type: string, format: binary}
@@ -6752,6 +6832,40 @@ components:
         uptime: {type: integer, description: 'seconds'}
         tx_bytes: {type: integer}
         rx_bytes: {type: integer}
+    ConsoleBackupComponent:
+      type: object
+      description: One application or service included in a console backup.
+      properties:
+        size: {type: integer, description: 'Bytes'}
+        version: {type: string, examples: [11.0.81-37038-1]}
+        success: {type: boolean, description: 'False if this component failed to back up'}
+    ConsoleBackup:
+      type: object
+      description: A console (UniFi OS) backup stored on the console.
+      properties:
+        id: {type: string, format: uuid}
+        time: {type: integer, description: 'Created at, Unix epoch milliseconds'}
+        frequency: {type: string, description: 'Schedule that produced it', examples: [WEEKLY]}
+        size: {type: integer, description: 'Archive size in bytes'}
+        metadata:
+          type: object
+          properties:
+            controllers:
+              type: object
+              description: Applications included, keyed by name (for example `network`).
+              additionalProperties: {$ref: '#/components/schemas/ConsoleBackupComponent'}
+            services:
+              type: object
+              description: Console services included, keyed by name (for example `users`).
+              additionalProperties: {$ref: '#/components/schemas/ConsoleBackupComponent'}
+            firmware_version: {type: string, description: 'UniFi OS version at backup time', examples: [6.0.11]}
+            hardware_shortname: {type: string, examples: [UCKP]}
+            id: {type: string, format: uuid, description: 'Same as the top-level `id`'}
+            mac: {type: string, description: 'Console MAC, upper case without separators'}
+            owner_id: {type: string, format: uuid, description: 'Console owner account'}
+            timezone: {type: string, examples: [Europe/London]}
+            created_at: {type: integer, description: 'Same as `time`'}
+            frequency: {type: string, description: 'Same as the top-level `frequency`'}
 
     # ================================================================ Cloud (Site Manager)
     CloudEnvelope:
