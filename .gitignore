@@ -30,3 +30,6 @@ test/e2e-cypress/videos
 
 # Browser network captures (can contain session cookies and full backups)
 *.har
+# Extracted UniFi support files (contain plain-text device secrets)
+support-*.tgz
+test/support-file/

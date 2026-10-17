@@ -41,9 +41,9 @@ info:
 
     ## Caveats
     - Integration API paths, parameters, enums and required fields are checked against the console's own built-in reference
-      (UniFi Network API 11.0.81, *Settings > Control Plane > Integrations*). Nested types (Wi-Fi security, firewall traffic
-      filters and schedules, ACL filters, IPv4/IPv6 network configuration and so on) come from the console's downloadable
-      OpenAPI document for 10.6.106, the newest complete one available; 11.0.81 may add variants not yet listed here.
+      (UniFi Network API 11.0.81, *Settings > Control Plane > Integrations*) and its OpenAPI document
+      (`getIntegrationOpenApi`). Nested types (Wi-Fi security, firewall traffic filters and schedules, ACL filters,
+      IPv4/IPv6 network configuration and so on) are generated from that document.
     - Controller-API schemas are deliberately partial (fields of interest only).
     - `/v1/dpi/applications` in the cloud Postman export was mislabelled; it is a local Integration endpoint and is listed there.
   contact:
@@ -2231,6 +2231,139 @@ paths:
       responses:
         '200': {description: 'OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}'}
         '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/userCertificates:
+    get:
+      operationId: listUserCertificates
+      summary: List custom TLS certificates (expiry, issuer, renewal status)
+      description: |
+        Certificates installed under *Settings > Control Plane > Console > Certificates*, including Let's Encrypt
+        certificates the console renews itself. Metadata only (no certificate or key material).
+        To check expiry, read `valid_to`; `acme_renew_error` is non-null when the last automatic renewal failed.
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/UserCertificate'}}
+              example:
+                - id: 6b1d2c3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e
+                  name: '*.matilda.network'
+                  version: 3
+                  serial_number: 0123456789ABCDEF0123456789ABCDEF0123
+                  fingerprint: 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33
+                  subject: {CN: '*.matilda.network'}
+                  issuer: {C: US, O: "Let's Encrypt", CN: YR1}
+                  subject_alt_name: {DNS: ['*.matilda.network']}
+                  valid_from: '2026-10-07T22:26:19.000Z'
+                  valid_to: '2027-01-05T22:26:18.000Z'
+                  created_at: '2026-10-07T23:24:50.753Z'
+                  updated_at: '2026-10-07T23:24:50.753Z'
+                  source: lets_encrypt
+                  acme_renew_error: null
+                  active: true
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/userCertificates/challenge/current:
+    get:
+      operationId: getCertificateChallenge
+      summary: Current ACME (Let's Encrypt) challenge
+      description: Returns `{}` when no certificate request or renewal is in progress. The in-progress shape has not been captured.
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+              example: {}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api-docs/integration.json:
+    get:
+      operationId: getIntegrationOpenApi
+      summary: Download the Integration API's own OpenAPI document
+      description: |
+        The machine-readable spec behind *Settings > Control Plane > Integrations > API docs*, for the running Network
+        version. Its `servers` entry is the relative `/integration`, so prefix `/proxy/network` when calling from outside.
+        Use it to check this spec after a Network application upgrade.
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OpenAPI 3.1 document
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/support/file/generate:
+    post:
+      operationId: generateSupportFile
+      summary: Generate a support file (diagnostic bundle)
+      description: |
+        Same as *Settings > Control Plane > Console > Support File* in the console UI. Takes about a minute; fetch the result
+        with `downloadSupportFile`. Omit `targets` for a combined console + Network bundle.
+        Far more complete than the log endpoints: for `network` it contains the Network
+        application logs (`server.log`, `access.log`, `tasks.log`, `mongod.log`, migration and backup logs), remote syslog
+        from every adopted device (`logs/remote2/`), each device's last inform and `system.cfg`, topology, crash log,
+        thread dump, admin change log and version history. Use it when the regular logs do not show the cause
+        (for example an STP issue visible only in device syslog).
+
+        **Sensitive:** device `system.cfg` files contain Wi-Fi passphrases, device SSH passwords and VPN/RADIUS secrets
+        in plain text. Never keep the bundle inside a git working tree; store it in Keeper or encrypted storage.
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targets:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  description: |
+                    Parts to include. Omit for everything.
+                    - `network`: Network application and adopted devices
+                    - `uos`: the console itself (UniFi OS on the Cloud Key)
+                  items: {type: string, enum: [network, uos]}
+                recreate: {type: boolean, default: false, description: 'Build a fresh bundle instead of reusing a recent one'}
+                requiredDevices:
+                  type: object
+                  additionalProperties: true
+                  description: Devices to collect extra data from; `{}` (none) is what the UI sends by default.
+            examples:
+              network:
+                summary: Network application only
+                value: {recreate: false, requiredDevices: {}, targets: [network]}
+              console:
+                summary: Console (Cloud Key) only
+                value: {recreate: false, requiredDevices: {}, targets: [uos]}
+              everythingFresh:
+                summary: Console and Network, freshly built
+                value: {recreate: true}
+      responses:
+        '200': {description: 'Support file generated (response body not captured)'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+        '403': {description: 'Missing or stale `X-CSRF-Token`'}
+  /api/support/file/download:
+    get:
+      operationId: downloadSupportFile
+      summary: Download the generated support file
+      description: |
+        Returns the bundle made by `generateSupportFile` as a gzipped tar, named `support-<last 4 hex of console MAC>-<epoch ms>.tgz`.
+        Contains secrets in plain text; see `generateSupportFile`.
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: Support bundle
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
   /api/backup/now:
     post:
       operationId: createConsoleBackup
@@ -2932,8 +3065,8 @@ components:
     DeviceRadio:
       type: object
       properties:
-        frequencyGHz: {type: number, description: 'Band in GHz', examples: [2.4, 5, 6]}
-        wlanStandard: {type: string, examples: [802.11ax]}
+        frequencyGHz: {type: number, enum: [0.9, 2.4, 5, 6, 60], description: 'Band in GHz (0.9 = Wi-Fi HaLow)'}
+        wlanStandard: {type: string, enum: [802.11a, 802.11b, 802.11g, 802.11n, 802.11ac, 802.11ax, 802.11be, 802.11ah]}
         channel: {type: integer, examples: [36]}
         channelWidthMHz: {type: integer, examples: [40, 80]}
     DeviceDetails:
@@ -3000,7 +3133,7 @@ components:
               items:
                 type: object
                 properties:
-                  frequencyGHz: {type: number, examples: [2.4, 5]}
+                  frequencyGHz: {type: number, enum: [0.9, 2.4, 5, 6, 60]}
                   txRetriesPct: {type: number, description: 'High values (over 15%) suggest interference'}
     DeviceActionRequest:
       type: object
@@ -3643,7 +3776,7 @@ components:
                   name: {type: string, examples: [Business tools]}
 
     # ================================================================ Integration: nested types
-    # Generated from the console's OpenAPI document (UniFi Network 10.6.106).
+    # Generated from the console's OpenAPI document (UniFi Network 11.0.81; unchanged from 10.6.106).
     WifiSecurityConfiguration:
       oneOf:
       - $ref: '#/components/schemas/WifiOpenSecurity'
@@ -6832,6 +6965,28 @@ components:
         uptime: {type: integer, description: 'seconds'}
         tx_bytes: {type: integer}
         rx_bytes: {type: integer}
+    UserCertificate:
+      type: object
+      description: A TLS certificate installed on the console (metadata only).
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string, description: 'Display name; the common name by default'}
+        version: {type: integer, description: 'X.509 version', examples: [3]}
+        serial_number: {type: string, description: 'Upper-case hex'}
+        fingerprint: {type: string, description: 'SHA-1 fingerprint, colon-separated hex'}
+        subject: {type: object, description: 'Subject distinguished-name fields (`CN`, `O`, ...), additionalProperties: {type: string}'}
+        issuer: {type: object, description: 'Issuer distinguished-name fields (`C`, `O`, `CN`), additionalProperties: {type: string}'}
+        subject_alt_name:
+          type: object
+          properties:
+            DNS: {type: array, items: {type: string}}
+        valid_from: {type: string, format: date-time}
+        valid_to: {type: string, format: date-time, description: 'Expiry. Let''s Encrypt certificates last 90 days and are renewed automatically.'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        source: {type: string, description: 'How it was installed', examples: [lets_encrypt]}
+        acme_renew_error: {type: [string, object, 'null'], description: 'Last automatic renewal error; null when renewal is healthy'}
+        active: {type: boolean, description: 'True for the certificate the console is currently serving'}
     ConsoleBackupComponent:
       type: object
       description: One application or service included in a console backup.
