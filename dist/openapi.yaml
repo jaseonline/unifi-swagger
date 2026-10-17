@@ -141,6 +141,9 @@ paths:
               localAccount:
                 summary: Local admin account
                 value: {username: api-readonly, password: '<from Keeper>', rememberMe: false}
+              withMfa:
+                summary: UI account with 2FA (TOTP generated at call time)
+                value: {username: admin@example.com, password: '<from Keeper>', token: '123456', rememberMe: true}
       responses:
         '200':
           description: Logged in
@@ -1956,6 +1959,9 @@ paths:
               reservation:
                 summary: Fixed-IP reservation on the IoT VLAN
                 value: {mac: '00:00:5e:00:53:2e', name: IoT sensor, use_fixedip: true, fixed_ip: 10.88.1.50, network_id: 0123456789abcdef01234567}
+              managementLan:
+                summary: Fixed-IP reservation on the management LAN, no local DNS record
+                value: {mac: '00:00:5e:00:53:3a', name: Laptop (LAN), use_fixedip: true, local_dns_record_enabled: false, fixed_ip: 192.168.1.60}
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
         '400': {$ref: '#/components/responses/LegacyBadRequest'}
@@ -1977,6 +1983,20 @@ paths:
             schema: {$ref: '#/components/schemas/KnownClientWrite'}
             examples:
               rename: {summary: 'Rename only', value: {name: Kitchen speaker}}
+              fullUiBody:
+                summary: Body the UI sends when saving a client's settings
+                value:
+                  name: Games console (WiFi)
+                  display_name: Games console (WiFi)
+                  local_dns_record_enabled: false
+                  local_dns_record: ''
+                  virtual_network_override_enabled: false
+                  virtual_network_override_id: ''
+                  network_members_group_ids: []
+                  usergroup_id: ''
+                  use_fixedip: true
+                  fixed_ip: 10.88.1.61
+                  fixed_ap_enabled: false
               clearFixedIp: {summary: 'Remove fixed IP', value: {use_fixedip: false}}
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -2013,6 +2033,8 @@ paths:
                   items: {$ref: '#/components/schemas/MacAddress'}
             examples:
               kick: {summary: 'Kick a wireless client', value: {cmd: kick-sta, mac: '00:00:5e:00:53:01'}}
+              block: {summary: 'Block a client', value: {cmd: block-sta, mac: '00:00:5e:00:53:01'}}
+              unblock: {summary: 'Unblock a client', value: {cmd: unblock-sta, mac: '00:00:5e:00:53:01'}}
               forget: {summary: 'Forget reviewed clients', value: {cmd: forget-sta, macs: ['00:00:5e:00:53:01', '00:00:5e:00:53:02']}}
       responses:
         '200': {$ref: '#/components/responses/LegacyOk'}
@@ -2042,10 +2064,15 @@ paths:
     get:
       operationId: listClientHistory
       summary: Historic clients (use to find stale or blocked clients)
+      description: |
+        To build a forget list of stale clients, call with `onlyNonBlocked=true&includeUnifiDevices=false&withinHours=0`,
+        then keep entries with `status` = `offline` and `use_fixedip` = `false` (fixed-IP reservations are kept).
       tags: [Controller · Clients]
       security: [{ControllerSession: []}]
       parameters:
-        - {name: onlyBlocked, in: query, schema: {type: boolean, default: false}}
+        - {name: onlyBlocked, in: query, description: 'Return blocked clients only', schema: {type: boolean, default: false}}
+        - {name: onlyNonBlocked, in: query, description: 'Exclude blocked clients', schema: {type: boolean, default: false}}
+        - {name: includeUnifiDevices, in: query, description: 'Include UniFi devices that appear as clients', schema: {type: boolean, default: false}}
         - {name: withinHours, in: query, description: '0 = all', schema: {type: integer, minimum: 0, default: 0}}
       responses:
         '200':
@@ -2975,13 +3002,20 @@ components:
 
     # ================================================================ Integration: networks
     NetworkWrite:
+      description: One variant per `management` type.
+      oneOf:
+        - {$ref: '#/components/schemas/GatewayNetworkWrite'}
+        - {$ref: '#/components/schemas/SwitchNetworkWrite'}
+        - {$ref: '#/components/schemas/UnmanagedNetworkWrite'}
+      discriminator:
+        propertyName: management
+        mapping:
+          GATEWAY: '#/components/schemas/GatewayNetworkWrite'
+          SWITCH: '#/components/schemas/SwitchNetworkWrite'
+          UNMANAGED: '#/components/schemas/UnmanagedNetworkWrite'
+    NetworkCommon:
       type: object
       required: [management, name, enabled, vlanId]
-      description: |
-        Field set depends on `management`:
-        - `GATEWAY` also requires `ipv4Configuration`, `internetAccessEnabled`, `isolationEnabled` and `cellularBackupEnabled`.
-        - `SWITCH` also requires `deviceId`, `ipv4Configuration`, `isolationEnabled` and `cellularBackupEnabled`.
-        - `UNMANAGED` takes only the common fields.
       properties:
         management:
           type: string
@@ -2998,24 +3032,44 @@ components:
           description: DHCP guarding - only the listed servers may answer DHCP on this network. Omitted or null disables it.
           properties:
             trustedDhcpServerIpAddresses: {type: array, items: {type: string, format: ipv4}}
-        isolationEnabled: {type: boolean, description: 'Block traffic to other local networks'}
-        cellularBackupEnabled: {type: boolean}
-        internetAccessEnabled: {type: boolean}
-        mdnsForwardingEnabled: {type: boolean}
-        zoneId: {type: string, format: uuid, description: 'Firewall zone this network belongs to (`GATEWAY` only)'}
-        deviceId: {type: string, format: uuid, description: 'Layer-3 switch that routes this network (`SWITCH` only)'}
-        ipv4Configuration:
-          description: Gateway-managed networks add NAT and DHCP-server options (PXE, NTP, WPAD and so on) to the switch-managed set.
-          oneOf:
-            - {$ref: '#/components/schemas/GatewayManagedIPv4Configuration'}
-            - {$ref: '#/components/schemas/SwitchManagedIPv4Configuration'}
-        ipv6Configuration:
-          $ref: '#/components/schemas/NetworkIPv6Configuration'
-          description: '`GATEWAY` only. Omitted or null means IPv6 is not configured.'
+    GatewayNetworkWrite:
+      allOf:
+        - {$ref: '#/components/schemas/NetworkCommon'}
+        - type: object
+          required: [ipv4Configuration, internetAccessEnabled, isolationEnabled, cellularBackupEnabled]
+          properties:
+            management: {const: GATEWAY}
+            isolationEnabled: {type: boolean, description: 'Block traffic to other local networks'}
+            cellularBackupEnabled: {type: boolean, description: 'Allow cellular data when the WAN is down'}
+            internetAccessEnabled: {type: boolean}
+            mdnsForwardingEnabled: {type: boolean, description: 'Null uses the site''s mDNS setting'}
+            zoneId: {type: string, format: uuid, description: 'Firewall zone this network belongs to'}
+            ipv4Configuration: {$ref: '#/components/schemas/GatewayManagedIPv4Configuration'}
+            ipv6Configuration:
+              $ref: '#/components/schemas/NetworkIPv6Configuration'
+              description: Omitted or null means IPv6 is not configured.
+    SwitchNetworkWrite:
+      allOf:
+        - {$ref: '#/components/schemas/NetworkCommon'}
+        - type: object
+          required: [deviceId, ipv4Configuration, isolationEnabled, cellularBackupEnabled]
+          properties:
+            management: {const: SWITCH}
+            deviceId: {type: string, format: uuid, description: 'Layer-3 switch that routes this network'}
+            isolationEnabled: {type: boolean, description: 'Block traffic to other local networks'}
+            cellularBackupEnabled: {type: boolean, description: 'Allow cellular data when the WAN is down'}
+            ipv4Configuration: {$ref: '#/components/schemas/SwitchManagedIPv4Configuration'}
+    UnmanagedNetworkWrite:
+      allOf:
+        - {$ref: '#/components/schemas/NetworkCommon'}
+        - type: object
+          properties:
+            management: {const: UNMANAGED}
     Network:
       allOf:
         - {$ref: '#/components/schemas/NetworkWrite'}
-        - properties:
+        - type: object
+          properties:
             id: {type: string, format: uuid, readOnly: true}
             default: {type: boolean, readOnly: true, description: 'The site''s default LAN'}
             metadata: {$ref: '#/components/schemas/Metadata'}
@@ -3231,8 +3285,17 @@ components:
     AclTrafficFilter:
       description: '`IPV4` rules take an IP endpoint filter (addresses or subnets, networks, or ports); `MAC` rules take a MAC filter.'
       oneOf:
-        - {$ref: '#/components/schemas/AclIpEndpointFilter'}
-        - {$ref: '#/components/schemas/AclMacEndpointFilter'}
+        - {$ref: '#/components/schemas/IpAclRuleSubnetEndpointFilter'}
+        - {$ref: '#/components/schemas/IpAclRuleNetworkEndpointFilter'}
+        - {$ref: '#/components/schemas/IpAclRulePortEndpointFilter'}
+        - {$ref: '#/components/schemas/MacAclRuleMacAddressEndpointFilter'}
+      discriminator:
+        propertyName: type
+        mapping:
+          IP_ADDRESSES_OR_SUBNETS: '#/components/schemas/IpAclRuleSubnetEndpointFilter'
+          NETWORKS: '#/components/schemas/IpAclRuleNetworkEndpointFilter'
+          PORTS: '#/components/schemas/IpAclRulePortEndpointFilter'
+          MAC_ADDRESSES: '#/components/schemas/MacAclRuleMacAddressEndpointFilter'
     AclRule:
       allOf:
         - {$ref: '#/components/schemas/AclRuleWrite'}
@@ -3723,24 +3786,6 @@ components:
           EVERY_DAY: '#/components/schemas/FirewallScheduleEveryDay'
           EVERY_WEEK: '#/components/schemas/FirewallScheduleEveryWeek'
           ONE_TIME_ONLY: '#/components/schemas/FirewallScheduleOneTimeOnly'
-    AclIpEndpointFilter:
-      oneOf:
-      - $ref: '#/components/schemas/IpAclRuleSubnetEndpointFilter'
-      - $ref: '#/components/schemas/IpAclRuleNetworkEndpointFilter'
-      - $ref: '#/components/schemas/IpAclRulePortEndpointFilter'
-      discriminator:
-        propertyName: type
-        mapping:
-          IP_ADDRESSES_OR_SUBNETS: '#/components/schemas/IpAclRuleSubnetEndpointFilter'
-          NETWORKS: '#/components/schemas/IpAclRuleNetworkEndpointFilter'
-          PORTS: '#/components/schemas/IpAclRulePortEndpointFilter'
-    AclMacEndpointFilter:
-      oneOf:
-      - $ref: '#/components/schemas/MacAclRuleMacAddressEndpointFilter'
-      discriminator:
-        propertyName: type
-        mapping:
-          MAC_ADDRESSES: '#/components/schemas/MacAclRuleMacAddressEndpointFilter'
     AclEnforcingDeviceFilter:
       oneOf:
       - $ref: '#/components/schemas/AclRuleDevicesFilter'
@@ -6660,11 +6705,19 @@ components:
       properties:
         mac: {$ref: '#/components/schemas/MacAddress'}
         name: {type: string}
+        display_name: {type: string, description: 'The UI sends the same value as `name`'}
         note: {type: string}
         noted: {type: boolean, description: 'Set true when `note` is present'}
         use_fixedip: {type: boolean}
         fixed_ip: {type: string, format: ipv4, description: 'Must be in .1-.100 (static block) of the network''s subnet'}
         network_id: {type: string, description: '`_id` from `listNetworkConfig`'}
+        local_dns_record_enabled: {type: boolean, description: 'Publish a local DNS record for this client'}
+        local_dns_record: {type: string, description: 'Hostname for the local DNS record; empty when disabled'}
+        virtual_network_override_enabled: {type: boolean, description: 'Place the client on a different network (VLAN) from its SSID or port'}
+        virtual_network_override_id: {type: string, description: '`_id` of the override network; empty when disabled'}
+        network_members_group_ids: {type: array, items: {type: string}, description: 'Client groups (used by policies) this client belongs to'}
+        usergroup_id: {type: string, description: 'Bandwidth profile (user group) `_id`; empty for the default'}
+        fixed_ap_enabled: {type: boolean, description: 'Lock a wireless client to one access point'}
         blocked: {type: boolean}
     KnownClient:
       allOf:
