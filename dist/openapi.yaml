@@ -98,9 +98,20 @@ tags:
   - name: Controller · Networks
     description: Undocumented network configuration and DHCP lease endpoints.
   - name: Controller · Firewall
-    description: Undocumented firewall group, zone and matrix endpoints.
+    description: Undocumented firewall group, zone and matrix endpoints, the UI's policy table (with hit counts), port forwards and traffic rules.
+  - name: Controller · Traffic
+    description: Insights - traffic flows, per-application and per-country usage, the dashboard and WAN uptime/SLA.
+  - name: Controller · Alerts
+    description: |
+      System Log (critical events), Alarm Manager rules and console notifications.
+
+      **Live events (WebSocket, not modelled as an operation):** `wss://<console>/proxy/network/wss/s/{site}/events?clients=v2`
+      streams device, client and alert events as they happen (session cookie required); `wss/s/super/events` carries
+      console-wide events. Useful for watching a change take effect instead of polling.
   - name: UniFi OS · System
-    description: Console-level (UniFi OS) settings, firmware and backups.
+    description: Console-level (UniFi OS) settings, firmware, applications, backups, certificates and support files.
+  - name: UniFi OS · Users
+    description: Console users, roles, permission areas and API keys. Use to confirm an integration account's rights.
   - name: Cloud · Hosts
     description: Consoles linked to the UI account.
     externalDocs: {description: 'Site Manager API reference', url: 'https://developer.ui.com/site-manager-api/'}
@@ -2459,6 +2470,1064 @@ paths:
               schema: {type: string, format: binary}
         '401': {$ref: '#/components/responses/LegacyUnauthorized'}
 
+  # ================================================================== CONTROLLER: traffic and Insights (from UI captures, 11.0.81)
+  /proxy/network/v2/api/site/{site}/traffic-flows:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    post:
+      operationId: queryTrafficFlows
+      summary: Query Insights traffic flows (who talked to whom, allowed or blocked)
+      description: |
+        Same data as *Insights > Flows*. Read-only despite POST. Every filter is an array; an empty array means "any".
+        Typical uses: blocked traffic in the last 24 hours (`action: [blocked]`), traffic for one client
+        (`source_mac`), or traffic hitting one policy (`policy`). Only policies with `reportFlowEnabled` appear.
+        Valid filter values (hosts, IPs, ports, policies) come from `getTrafficFlowFilterData`.
+      tags: [Controller · Traffic]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TrafficFlowQuery'}
+            examples:
+              blocked24h:
+                summary: Blocked flows in a 24-hour window, first page
+                value:
+                  action: [blocked]
+                  risk: []
+                  direction: []
+                  protocol: []
+                  policy: []
+                  source_mac: []
+                  destination_port: []
+                  timestampFrom: 1792122178094
+                  timestampTo: 1792208578094
+                  pageNumber: 0
+                  pageSize: 100
+                  search_text: ''
+                  skip_count: false
+      responses:
+        '200':
+          description: One page of flows
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TrafficFlowPage'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/traffic-flows/filter-data:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: getTrafficFlowFilterData
+      summary: Values available to filter traffic flows by
+      description: Hosts, IPs, MACs and ports seen as source or destination, plus the policies that reported flows.
+      tags: [Controller · Traffic]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {name: inputSize, in: query, description: 'Flows to scan', schema: {type: integer, examples: [10000]}}
+        - {name: outputSize, in: query, description: 'Maximum values returned per list', schema: {type: integer, examples: [1000]}}
+        - {name: skipElements, in: query, schema: {type: integer, default: 0}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TrafficFlowFilterData'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/traffic:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: getTrafficByApplication
+      summary: Traffic by application, per client and site-wide (DPI)
+      description: |
+        Same data as *Insights > Traffic*. `application` and `category` are DPI IDs; resolve names with
+        `listDpiApplications` / `listDpiCategories` (Integration API).
+      tags: [Controller · Traffic]
+      security: [{ControllerSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/TimeStartMs'
+        - $ref: '#/components/parameters/TimeEndMs'
+        - {name: includeUnidentified, in: query, description: 'Include traffic DPI could not classify', schema: {type: boolean, default: false}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TrafficByApplication'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/app-traffic-rate:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    post:
+      operationId: getAppTrafficRate
+      summary: Site traffic rate over time, with the top application per interval
+      description: Read-only despite POST; the UI sends an empty JSON body.
+      tags: [Controller · Traffic]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      parameters:
+        - $ref: '#/components/parameters/TimeStartMs'
+        - $ref: '#/components/parameters/TimeEndMs'
+        - {name: includeUnidentified, in: query, schema: {type: boolean, default: false}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {}
+      responses:
+        '200':
+          description: One entry per interval
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/AppTrafficRateInterval'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/country-traffic:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: getTrafficByCountry
+      summary: Internet traffic by country
+      description: Useful for spotting unexpected destinations (pair with a region filter in a firewall policy).
+      tags: [Controller · Traffic]
+      security: [{ControllerSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/TimeStartMs'
+        - $ref: '#/components/parameters/TimeEndMs'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usage_by_country:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        country: {type: string, description: 'ISO 3166-1 alpha-2', examples: [GB]}
+                        bytes_received: {type: integer}
+                        bytes_transmitted: {type: integer}
+                        total_bytes: {type: integer}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/aggregated-dashboard:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: getDashboard
+      summary: Dashboard data in one call (WAN, Wi-Fi, radios, top apps and clients)
+      description: |
+        Everything the Network dashboard shows: WAN activity with latency and packet loss history, system status,
+        Wi-Fi activity and TX retries per AP, radio density and channel configuration, most active apps / APs / clients,
+        speed test results, upgradable device count and safe-mode (degradation) status. A good single call for a health check.
+      tags: [Controller · Traffic]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {name: historySeconds, in: query, description: 'History window', schema: {type: integer, examples: [86400]}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Dashboard'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/wan/networkgroups:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listWanGroups
+      summary: WAN connections with uptime and failover priority
+      tags: [Controller · Traffic]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {name: uptime, in: query, description: 'Include `uptime` (percentage)', schema: {type: boolean, default: false}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  wan_network_groups:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string, examples: [WAN]}
+                        network_id: {type: string}
+                        priority: {type: integer, description: 'Failover order'}
+                        load_balancing_mode: {type: string}
+                        is_mobile_broadband: {type: boolean}
+                        wan_magic_enabled: {type: boolean}
+                        uptime: {type: number, description: 'Percentage', examples: [99.98]}
+                        port_info:
+                          type: object
+                          properties:
+                            port_idx: {type: integer}
+                            port_ifname: {type: string, examples: [eth4]}
+                            disabled: {type: boolean}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/wan-slas:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listWanSlaMonitors
+      summary: WAN SLA monitors (latency and loss thresholds per target)
+      tags: [Controller · Traffic]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    _id: {type: string}
+                    name: {type: string}
+                    monitor_health_type: {type: string}
+                    monitor_down_threshold: {type: integer}
+                    monitors:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          monitor_id: {type: integer}
+                          type: {type: string, examples: [icmp]}
+                          target: {type: string, examples: [1.1.1.1]}
+                          interval: {type: integer, description: 'Seconds'}
+                          time_period: {type: integer, description: 'Seconds'}
+                          alert:
+                            type: object
+                            properties:
+                              latency_threshold: {type: integer, description: 'ms'}
+                              loss_threshold: {type: integer, description: 'Percent'}
+                              threshold_policy: {type: string}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+
+  # ================================================================== CONTROLLER: alerts and logs
+  /proxy/network/v2/api/site/{site}/system-log/critical:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    post:
+      operationId: querySystemLog
+      summary: Critical System Log entries (the "Critical" tab)
+      description: |
+        Same data as *System Log > Critical*. Read-only despite POST. No time window or paging; filter by severity,
+        category, subcategory and event type. For the full history use `querySystemLogAll`.
+        Includes switching problems the device logs rarely surface clearly, for example `NETWORK_LOOP_DETECTED_BY_STP`,
+        `LOG_SWITCH_PORT_STP_FLAP`, `BPDU_GUARD_TRIGGERED`, `PORT_BROADCAST_STORM`, `ROGUE_DHCP_SERVER_DETECTED`.
+        The UI sends every value; send only the ones of interest to narrow the result.
+      tags: [Controller · Alerts]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SystemLogQuery'}
+            examples:
+              switchingProblems:
+                summary: Loops, STP flaps and storms
+                value:
+                  searchText: ''
+                  severities: [LOW, MEDIUM, HIGH, VERY_HIGH]
+                  categories: [UNIFI_DEVICES, UNIFI_ETHERNET_PORTS]
+                  subcategories: [SYSTEM_DEVICES, MONITORING_WIRED]
+                  events: [NETWORK_LOOP_DETECTED_BY_STP, NETWORK_LOOP_DETECTED_BY_KEEPALIVE, LOG_SWITCH_PORT_STP_FLAP, BPDU_GUARD_TRIGGERED, PORT_BROADCAST_STORM, PORT_MULTICAST_STORM]
+                  clientDeviceMacs: []
+                  adminIds: []
+              security:
+                summary: Firewall blocks, IPS and honeypot
+                value:
+                  searchText: ''
+                  severities: [MEDIUM, HIGH, VERY_HIGH]
+                  categories: [SECURITY]
+                  subcategories: [SECURITY_FIREWALL, SECURITY_INTRUSION_PREVENTION, SECURITY_HONEYPOT]
+                  events: [BLOCKED_BY_FIREWALL, THREAT_DETECTED, THREAT_BLOCKED, HONEYPOT_HIT_DETECTED]
+                  clientDeviceMacs: []
+                  adminIds: []
+      responses:
+        '200':
+          description: Matching critical entries (an empty list when there are none)
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/SystemLogEntry'}}
+              example:
+                - id: 0123456789abcdef01234567
+                  timestamp: 1760569347807
+                  type: DEVICE_CONNECTION
+                  key: DEVICE_UNREACHABLE
+                  event: DEVICE_UNREACHABLE
+                  category: SYSTEM
+                  subcategory: SYSTEM_DEVICES
+                  severity: HIGH
+                  status: NEW
+                  show_on_dashboard: true
+                  target: DEVICE
+                  title_raw: Device Offline
+                  message_raw: '{DEVICE} is offline.'
+                  parameters:
+                    DEVICE: {id: '00:00:5e:00:53:05', ip: 192.168.1.5, model: US-8, model_name: US8, name: Switch 8, version: 7.2.123}
+                    UPLINK: {id: '00:00:5e:00:53:03', name: Switch 16 PoE, port: '9'}
+                    LEARN_MORE: {id: LEARN_MORE_ABOUT_DEVICE_OFFLINE, name: Learn more, url: 'https://help.ui.com/hc/en-us/articles/7258465146519'}
+                - id: 0123456789abcdef01234568
+                  timestamp: 1760513187345
+                  type: SWITCH_ISSUE
+                  key: NETWORK_LOOP_DETECTED_BY_STP
+                  event: NETWORK_LOOP_DETECTED_BY_STP
+                  category: SYSTEM
+                  subcategory: SYSTEM_NETWORK
+                  severity: HIGH
+                  status: NEW
+                  show_on_dashboard: true
+                  target: DEVICE_WITH_PORT
+                  title_raw: STP Port Blocked
+                  message_raw: '{DEVICE_WITH_PORT} was blocked by STP to prevent a network loop.'
+                  parameters:
+                    DEVICE_WITH_PORT: {id: '00:00:5e:00:53:03', ip: 192.168.1.3, model: USW-16-PoE, model_name: USL16PB, name: Switch 16 PoE Port 9, version: 7.2.123}
+                    PORT: {id: '9', name: '9'}
+                    DOWNLINK_MACS: {id: '00:00:5e:00:53:03', list_values: ['00:00:5e:00:53:05']}
+                    LEARN_MORE: {id: LEARN_MORE_ABOUT_LOOP, name: Learn more, url: 'https://help.ui.com/hc/en-us/articles/24292724428311'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/system-log/all:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    post:
+      operationId: querySystemLogAll
+      summary: System Log history, paged (the "All" tab)
+      description: |
+        Every System Log entry in a time window, newest first. Read-only despite POST. Volume is dominated by Wi-Fi
+        connect, disconnect and roam events (about 2,000 a month on this site), so narrow with `severities`
+        (for example `MEDIUM` and above) or `categories` unless client history is the point.
+        Entries are templates: replace each `{NAME}` in `title_raw` / `message_raw` with `parameters.NAME.name`.
+        For one entry as a syslog line use `getSystemLogEntryCef`.
+      tags: [Controller · Alerts]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/SystemLogQuery'}
+                - type: object
+                  required: [timestampFrom, timestampTo, pageNumber, pageSize]
+            examples:
+              notableLast7Days:
+                summary: Medium severity and above, last 7 days
+                value:
+                  searchText: ''
+                  type: GENERAL
+                  severities: [MEDIUM, HIGH, VERY_HIGH]
+                  categories: [INTERNET_AND_WAN, POWER, SECURITY, UNIFI_DEVICES, UNIFI_ETHERNET_PORTS, VPN]
+                  timestampFrom: 1791603778036
+                  timestampTo: 1792208578036
+                  pageNumber: 0
+                  pageSize: 100
+                  clientDeviceMacs: []
+                  adminIds: []
+              oneClient:
+                summary: Everything for one client
+                value:
+                  searchText: ''
+                  type: GENERAL
+                  severities: [LOW, MEDIUM, HIGH, VERY_HIGH]
+                  timestampFrom: 1791603778036
+                  timestampTo: 1792208578036
+                  pageNumber: 0
+                  pageSize: 100
+                  clientDeviceMacs: ['00:00:5e:00:53:2e']
+                  adminIds: []
+      responses:
+        '200':
+          description: One page of entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: '#/components/schemas/SystemLogEntry'}}
+                  page_number: {type: integer}
+                  total_element_count: {type: integer}
+                  total_page_count: {type: integer}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/system-log/filter-data:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    post:
+      operationId: getSystemLogFilterData
+      summary: Values available to filter the System Log by (for a time window)
+      description: Read-only despite POST. Takes the same filters as `querySystemLogAll`, without paging.
+      tags: [Controller · Alerts]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SystemLogQuery'}
+      responses:
+        '200':
+          description: Filter values (shape not yet captured)
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/system-log/{logId}/cef:
+    parameters:
+      - {$ref: '#/components/parameters/Site'}
+      - name: logId
+        in: path
+        required: true
+        description: The `id` of a System Log entry (UUID or 24-hex).
+        schema: {type: string}
+    get:
+      operationId: getSystemLogEntryCef
+      summary: One System Log entry as a CEF syslog line
+      description: |
+        The entry rendered in ArcSight CEF, exactly as sent to a remote syslog server: every parameter appears as a
+        `UNIFIname=value` extension plus a resolved `msg`. The UI also passes the same ID as `?id=`.
+        Handy for a one-line, fully resolved summary of an event.
+      tags: [Controller · Alerts]
+      security: [{ControllerSession: []}]
+      parameters:
+        - name: id
+          in: query
+          description: Same value as `logId`.
+          schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cef_log: {type: string}
+              example:
+                cef_log: 'CEF:0|Ubiquiti|UniFi Network|11.0.81|401|WiFi Client Disconnected|2|UNIFIcategory=Client Devices UNIFIsite=Example Site UNIFIhost=Cloud Key Gen2 Plus UNIFIlastConnectedToDeviceName=AP-Hall UNIFIlastConnectedToDeviceIp=192.168.1.6 UNIFIclientAlias=Tablet UNIFIclientIp=192.168.1.150 UNIFIclientMac=00:00:5e:00:53:2e UNIFIwifiChannel=100 UNIFIwifiName=example-ssid UNIFIwifiBand=na UNIFIlastConnectedToWiFiRssi=-61 UNIFIduration=9m 43s UNIFInetworkName=LAN UNIFInetworkVlan=1 UNIFIutcTime=2026-10-16T11:41:55.474Z msg=Tablet disconnected from example-ssid. Time Connected: 9m 43s. Last Connected To: AP-Hall at -61 dBm.'
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/v2/alarms/network:
+    get:
+      operationId: listAlarmRules
+      summary: Alarm Manager rules (what triggers a notification, and how)
+      description: Each rule has trigger and action categories, a scope (site, devices) and `stats.executions_24h`.
+      tags: [Controller · Alerts]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/AlarmRule'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/v2/alarms/network/activity-24h:
+    get:
+      operationId: getAlarmActivity
+      summary: Alarms fired in the last 24 hours
+      tags: [Controller · Alerts]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report_start: {type: string, format: date-time}
+                  report_middle: {type: string, format: date-time}
+                  entries: {type: array, items: {type: object, additionalProperties: true}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/v2/alarms/network/manifest:
+    get:
+      operationId: getAlarmManifest
+      summary: Catalogue of available alarm triggers, actions and scopes
+      description: Use to discover trigger and action IDs before reading or designing alarm rules.
+      tags: [Controller · Alerts]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {description: 'OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/notifications/settings:
+    get:
+      operationId: getConsoleNotificationSettings
+      summary: Console notification settings (email / push per event)
+      tags: [Controller · Alerts]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: {type: string}
+                  events:
+                    type: object
+                    description: Keyed by event, for example `consoleOverloadDetected`, `psuOffline`, `firmwareUpdateFailedInsufficientStorage`.
+                    additionalProperties:
+                      type: object
+                      properties:
+                        emailEnabled: {type: boolean}
+                        pushEnabled: {type: boolean}
+                        visible: {type: boolean}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+
+  # ================================================================== CONTROLLER: firewall (UI view)
+  /proxy/network/v2/api/site/{site}/firewall-policies:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listFirewallPoliciesWithHits
+      summary: Zone-based firewall policies with hit counts (UI view)
+      description: |
+        The list the UI's *Policy Table* shows, including system-defined policies. Unlike `listFirewallPolicies`
+        it returns `hits` and `last_hit`, which make it the right source for audits (unused, shadowed or noisy rules).
+        Use the Integration API to change policies.
+      tags: [Controller · Firewall]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/FirewallPolicyUi'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/trafficrules:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listTrafficRules
+      summary: Traffic rules (legacy simple app / domain blocking and rate limits)
+      tags: [Controller · Firewall]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {type: object, additionalProperties: true}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/trafficroutes:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listTrafficRoutes
+      summary: Policy-based routes (send selected traffic via a VPN or WAN)
+      tags: [Controller · Firewall]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {type: object, additionalProperties: true}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/content-filtering:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listContentFilters
+      summary: Content filtering profiles
+      tags: [Controller · Firewall]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {type: object, additionalProperties: true}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/rest/portforward:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listPortForwards
+      summary: Port forwards
+      tags: [Controller · Firewall]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+
+  # ================================================================== CONTROLLER: configuration
+  /proxy/network/api/s/{site}/get/setting:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listSiteSettings
+      summary: All site settings (one record per `key`)
+      description: |
+        Every site-level setting group in one call: for example `mgmt` (device SSH), `ips`, `dpi`, `ntp`, `snmp`,
+        `rsyslogd`, `radius`, `teleport`, `ssl_inspection`, `doh`, `netflow`, `country`, `connectivity`, `guest_access`,
+        `super_mgmt`, `super_smtp` (47 keys on 11.0.81). Read one group with `getSiteSetting`.
+
+        **Sensitive:** fields prefixed `x_` hold secrets in plain text (device SSH password, RADIUS and SMTP secrets,
+        SNMP community, element PSK). Never log or store the raw response.
+      tags: [Controller · System]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/get/setting/{key}:
+    parameters:
+      - {$ref: '#/components/parameters/Site'}
+      - name: key
+        in: path
+        required: true
+        description: Setting group
+        schema:
+          type: string
+          examples: [mgmt, ips, rsyslogd, ntp, snmp, connectivity, ssl_inspection]
+    get:
+      operationId: getSiteSetting
+      summary: One site setting group
+      description: Same record shape as one entry of `listSiteSettings`; same secrets warning applies.
+      tags: [Controller · System]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/described-features:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listSiteFeatures
+      summary: Feature flags supported on this site and console
+      description: |
+        Names such as `ZONE_BASED_FIREWALL`, `WAN_SLA`, `ALARM_MANAGER`, `SWITCH_CUSTOM_ACL_RULES`, `WIREGUARD_VPN_SERVER`
+        (113 on 11.0.81). Check before calling an endpoint whose feature may be absent.
+      tags: [Controller · System]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {name: includeSystemFeatures, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: {type: string, examples: [ZONE_BASED_FIREWALL]}
+                    feature_exists: {type: boolean}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/global/config/network:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: getGlobalNetworkConfig
+      summary: Site-wide network settings (IGMP snooping, mDNS, multicast, default security posture)
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  default_security_posture: {type: string}
+                  igmp_snooping_for: {type: string}
+                  igmp_snooping_for_network_ids: {type: array, items: {type: string}}
+                  igmp_fastleave_for_network_ids: {type: array, items: {type: string}}
+                  igmp_querier_switches: {type: array, items: {type: object, additionalProperties: true}}
+                  flood_unknown_multicast_for_network_ids: {type: array, items: {type: string}}
+                  mdns_enabled_for: {type: string}
+                  mdns_enabled_for_network_ids: {type: array, items: {type: string}}
+                  ipv6_pd_interfaces: {type: array, items: {type: object, properties: {wan_id: {type: string}, wan_networkgroup: {type: string}}}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/lan/enriched-configuration:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listLanConfigurationWithStats
+      summary: Networks (LANs) with live client counts and satisfaction
+      description: '`configuration` is the `networkconf` record; `statistics` adds current/peak clients and satisfaction.'
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/EnrichedConfiguration'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/wlan/enriched-configuration:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listWlanConfigurationWithStats
+      summary: SSIDs with live client counts and satisfaction
+      description: '`configuration` is the `wlanconf` record (includes the passphrase); `statistics` adds clients, APs and satisfaction.'
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/EnrichedConfiguration'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/wan/enriched-configuration:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listWanConfigurationWithStats
+      summary: WAN connections with uptime percentage, peak usage and ISP details
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/EnrichedConfiguration'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/rest/wlanconf:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listWlanConfigLegacy
+      summary: SSID configuration (controller format)
+      description: |
+        Every SSID setting the UI exposes, including some the Integration API does not (for example `ap_group_ids`,
+        minimum data rates, roaming assistant). **Sensitive:** includes `x_passphrase` and `x_iapp_key` in plain text.
+        Prefer `listWifiBroadcasts` unless a field is only here.
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/v2/api/site/{site}/apgroups:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listApGroups
+      summary: AP groups (which access points broadcast which SSIDs)
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    _id: {type: string}
+                    name: {type: string}
+                    device_macs: {type: array, items: {$ref: '#/components/schemas/MacAddress'}}
+                    for_wlanconf: {type: boolean}
+                    attr_no_delete: {type: boolean}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/rest/portconf:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listPortProfiles
+      summary: Switch port profiles
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/rest/routing:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listStaticRoutes
+      summary: Static routes
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/rest/usergroup:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listBandwidthProfiles
+      summary: Bandwidth profiles (user groups)
+      description: '`_id` is the `usergroup_id` on known clients. `qos_rate_max_down` / `_up` are kbps; `-1` = unlimited.'
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/rest/radiusprofile:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listRadiusProfilesLegacy
+      summary: RADIUS profiles (controller format)
+      description: '**Sensitive:** `auth_servers[].x_secret` and `acct_servers[].x_secret` are shared secrets in plain text.'
+      tags: [Controller · Networks]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/network/api/s/{site}/rest/scheduletask:
+    parameters: [{$ref: '#/components/parameters/Site'}]
+    get:
+      operationId: listScheduledTasks
+      summary: Scheduled tasks (for example nightly network optimisation)
+      tags: [Controller · System]
+      security: [{ControllerSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/LegacyList'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+
+  # ================================================================== UNIFI OS: applications, updates, cloud backups
+  /proxy/users/api/v2/ucore/controllers:
+    get:
+      operationId: listConsoleApplications
+      summary: Applications on the console (installed, running, version)
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/UsersEnvelope'}
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            type: {type: string}
+                            name: {type: string, examples: [network]}
+                            version: {type: string, examples: [11.0.81]}
+                            isInstalled: {type: boolean}
+                            isConfigured: {type: boolean}
+                            isRunning: {type: boolean}
+                            installState: {type: string}
+                            port: {type: integer}
+                            features: {type: object, additionalProperties: {type: boolean}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/users/api/v2/info:
+    get:
+      operationId: getConsoleInfo
+      summary: Console identity, versions and capabilities
+      description: |
+        Hostname, hardware, UniFi OS build, every application version (`network_version`, `ucore_version`, ...),
+        capability lists, start time, remote access and cloud connection state. A cheap first call for "what am I talking to".
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/UsersEnvelope'}
+                  - type: object
+                    properties:
+                      data: {type: object, additionalProperties: true}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/controllers/checkUpdates:
+    post:
+      operationId: checkApplicationUpdates
+      summary: Ask the console to check for application updates
+      description: Triggers a check only; nothing is installed. Read the result from `getFirmwareUpdates` / `listConsoleApplications`.
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: [], CsrfToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [controllersToCheck]
+              properties:
+                controllersToCheck: {type: array, items: {type: string, examples: [network]}}
+            example: {controllersToCheck: [network]}
+      responses:
+        '204': {description: 'Check started'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /api/cloud/backup/settings/list:
+    get:
+      operationId: listCloudBackups
+      summary: Cloud (off-console) backups for this console
+      description: |
+        Backups stored in the UI cloud, newest first. Pair with `listConsoleBackups` to confirm an off-site copy exists.
+        `fileKey` identifies the cloud object; treat it as sensitive.
+      tags: [UniFi OS · System]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {name: allBackups, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    deviceId: {type: string}
+                    hardwareId: {type: string}
+                    name: {type: string}
+                    backups:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          filename: {type: string}
+                          fileKey: {type: string}
+                          size: {type: integer}
+                          time: {type: integer, description: 'Unix epoch milliseconds'}
+                          metadata: {type: object, additionalProperties: true, description: 'As `ConsoleBackup.metadata`, plus `encryption-version`'}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+
+  # ================================================================== UNIFI OS: users, roles and API keys
+  /proxy/users/api/v2/user/self:
+    get:
+      operationId: getCurrentUser
+      summary: The logged-in user, with roles and effective permissions
+      description: |
+        Use at start-up to confirm which account an integration is running as and what it may do
+        (`permissions["network.management"]` is `["admin"]`, `["readonly"]` and so on).
+      tags: [UniFi OS · Users]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/UsersEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/ConsoleUser'}
+              example:
+                code: 0
+                codeS: SUCCESS
+                msg: ''
+                data:
+                  unique_id: 2b6f1c3e-4d5a-4e6b-8c7d-9e0f1a2b3c4d
+                  username: svc-claude-mcp
+                  full_name: Claude MCP
+                  status: ACTIVE
+                  only_local_account: true
+                  roles: [{unique_id: 5c4b3a29-1807-4f6e-9d5c-4b3a29180700, name: Network read-only, system_role: false, level: 3}]
+                  permissions: {network.management: [readonly], system.management.user: [readonly]}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/users/api/v2/users/admin/uos:
+    get:
+      operationId: listConsoleAdmins
+      summary: Console administrators
+      description: Review who can administer the console and with which role.
+      tags: [UniFi OS · Users]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {name: page_num, in: query, schema: {type: integer, default: 1}}
+        - {name: page_size, in: query, schema: {type: integer, examples: [999]}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/UsersEnvelope'}
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: '#/components/schemas/ConsoleUser'}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/users/api/v2/custom_roles:
+    get:
+      operationId: listRoles
+      summary: Roles (system and custom) with their permissions and member counts
+      description: Use with `listPermissionManifests` to design a least-privilege role for an integration account.
+      tags: [UniFi OS · Users]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/UsersEnvelope'}
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          allOf:
+                            - {$ref: '#/components/schemas/ConsoleRole'}
+                            - type: object
+                              properties:
+                                users_count: {type: integer}
+                                permissions:
+                                  type: array
+                                  items:
+                                    type: object
+                                    properties:
+                                      manifest_unique_key: {type: string, examples: [network.management]}
+                                      formulas: {type: array, items: {type: string}, examples: [[readonly]]}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/users/api/v2/permission_manifests:
+    get:
+      operationId: listPermissionManifests
+      summary: Permission areas and the levels each offers (admin, read-only, ...)
+      tags: [UniFi OS · Users]
+      security: [{ControllerSession: []}]
+      parameters:
+        - {name: clean, in: query, schema: {type: integer, enum: [0, 1]}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/UsersEnvelope'}
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            unique_key: {type: string, examples: [network.management]}
+                            name: {type: string}
+                            grant_method: {type: string}
+                            choice: {type: string}
+                            scope_formulas:
+                              type: object
+                              description: Keyed by level, for example `admin`, `readonly`.
+                              additionalProperties:
+                                type: object
+                                properties:
+                                  name: {type: string}
+                                  key: {type: string}
+                                  scopes: {type: array, items: {type: string}}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
+  /proxy/users/api/v2/keys:
+    get:
+      operationId: listApiKeys
+      summary: API keys (masked), with permissions and last use
+      description: Audit which keys exist, what they can do and whether they are still used (`last_used_at`). Keys are masked.
+      tags: [UniFi OS · Users]
+      security: [{ControllerSession: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/UsersEnvelope'}
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: {type: string}
+                            name: {type: string}
+                            masked_api_key: {type: string, examples: ['abcd************************wxyz']}
+                            permissions: {type: object, additionalProperties: {type: array, items: {type: string}}}
+                            scopes: {type: array, items: {type: string}}
+                            creator_user_id: {type: string}
+                            created_at: {type: string, format: date-time}
+                            updated_at: {type: string, format: date-time}
+                            last_used_at: {type: [string, 'null'], format: date-time}
+        '401': {$ref: '#/components/responses/LegacyUnauthorized'}
   # ================================================================== CLOUD (Site Manager)
   /v1/hosts:
     servers: [{url: 'https://api.ui.com', description: UniFi Site Manager (cloud)}]
@@ -2735,6 +3804,18 @@ components:
         on every POST, PUT and DELETE (operations list both schemes). The server may rotate it via an `X-Updated-Csrf-Token`
         response header; use the newest value.
   parameters:
+    TimeStartMs:
+      name: start
+      in: query
+      required: true
+      description: Window start, Unix epoch milliseconds.
+      schema: {type: integer, examples: [1792122178121]}
+    TimeEndMs:
+      name: end
+      in: query
+      required: true
+      description: Window end, Unix epoch milliseconds.
+      schema: {type: integer, examples: [1792208578121]}
     SiteId:
       name: siteId
       in: path
@@ -2873,6 +3954,16 @@ components:
       description: Seconds to wait before retrying.
       schema: {type: integer, examples: [30]}
   responses:
+    LegacyList:
+      description: Controller envelope with a list of records (record fields vary; see the operation description)
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: '#/components/schemas/LegacyEnvelope'}
+              - type: object
+                properties:
+                  data: {type: array, items: {type: object, additionalProperties: true}}
     # ---- Integration API errors
     BadRequest:
       description: Invalid parameter, filter expression or body
@@ -7021,6 +8112,401 @@ components:
             timezone: {type: string, examples: [Europe/London]}
             created_at: {type: integer, description: 'Same as `time`'}
             frequency: {type: string, description: 'Same as the top-level `frequency`'}
+
+    # ================================================================ Controller: traffic, alerts, firewall UI view
+    TrafficFlowQuery:
+      type: object
+      description: All filter arrays are optional; empty means "any". Timestamps are Unix epoch milliseconds.
+      required: [timestampFrom, timestampTo, pageNumber, pageSize]
+      properties:
+        action: {type: array, items: {type: string}, description: 'For example `blocked` or `allowed`', examples: [[blocked]]}
+        risk: {type: array, items: {type: string}}
+        direction: {type: array, items: {type: string}}
+        protocol: {type: array, items: {type: string}}
+        policy: {type: array, items: {type: string}, description: 'Policy IDs (from `getTrafficFlowFilterData`)'}
+        policy_type: {type: array, items: {type: string}}
+        service: {type: array, items: {type: string}}
+        application: {type: array, items: {type: integer}, description: 'DPI application IDs'}
+        source_host: {type: array, items: {type: string}}
+        source_mac: {type: array, items: {type: string}}
+        source_ip: {type: array, items: {type: string}}
+        source_port: {type: array, items: {type: integer}}
+        source_network_id: {type: array, items: {type: string}}
+        source_domain: {type: array, items: {type: string}}
+        source_zone_id: {type: array, items: {type: string}}
+        source_region: {type: array, items: {type: string}}
+        destination_host: {type: array, items: {type: string}}
+        destination_mac: {type: array, items: {type: string}}
+        destination_ip: {type: array, items: {type: string}}
+        destination_port: {type: array, items: {type: integer}}
+        destination_network_id: {type: array, items: {type: string}}
+        destination_domain: {type: array, items: {type: string}}
+        destination_zone_id: {type: array, items: {type: string}}
+        destination_region: {type: array, items: {type: string}}
+        in_network_id: {type: array, items: {type: string}}
+        out_network_id: {type: array, items: {type: string}}
+        next_ai_query: {type: array, items: {type: string}}
+        except_for: {type: array, items: {type: string}}
+        timestampFrom: {type: integer, description: 'Window start (epoch ms)'}
+        timestampTo: {type: integer, description: 'Window end (epoch ms)'}
+        pageNumber: {type: integer, minimum: 0, description: 'Zero-based'}
+        pageSize: {type: integer, examples: [100]}
+        search_text: {type: string}
+        skip_count: {type: boolean, description: 'Skip computing totals (faster)'}
+    TrafficFlowPage:
+      type: object
+      properties:
+        data: {type: array, items: {type: object, additionalProperties: true}, description: 'Flow records (shape not yet captured)'}
+        has_next: {type: boolean}
+        or_more: {type: boolean, description: 'True when `total_element_count` is a lower bound'}
+        page_number: {type: integer}
+        total_element_count: {type: integer}
+        total_page_count: {type: integer}
+    TrafficFlowFilterData:
+      type: object
+      properties:
+        applications: {type: array, items: {type: object, additionalProperties: true}}
+        policies:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              name: {type: string}
+              type: {type: string}
+              internal_type: {type: string}
+        source: {$ref: '#/components/schemas/TrafficFlowEndpointValues'}
+        destination: {$ref: '#/components/schemas/TrafficFlowEndpointValues'}
+        next_ai_queries: {type: array, items: {type: object, additionalProperties: true}}
+    TrafficFlowEndpointValues:
+      type: object
+      properties:
+        hosts: {type: array, items: {type: object, properties: {id: {type: string}, ip: {type: string}, mac: {type: string}}}}
+        ips: {type: array, items: {type: string}}
+        macs: {type: array, items: {type: string}}
+        ports: {type: array, items: {type: integer}}
+    TrafficByApplication:
+      type: object
+      properties:
+        total_usage_by_app:
+          type: array
+          items:
+            type: object
+            properties:
+              application: {type: integer, description: 'DPI application ID'}
+              category: {type: integer, description: 'DPI category ID'}
+              bytes_received: {type: integer}
+              bytes_transmitted: {type: integer}
+              total_bytes: {type: integer}
+              client_count: {type: integer}
+        client_usage_by_app:
+          type: array
+          items:
+            type: object
+            properties:
+              client:
+                type: object
+                properties:
+                  mac: {type: string}
+                  name: {type: string}
+                  oui: {type: string}
+                  is_wired: {type: boolean}
+                  fingerprint: {type: object, additionalProperties: true}
+              usage_by_app:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    application: {type: integer}
+                    category: {type: integer}
+                    bytes_received: {type: integer}
+                    bytes_transmitted: {type: integer}
+                    total_bytes: {type: integer}
+                    activity_seconds: {type: integer}
+    AppTrafficRateInterval:
+      type: object
+      properties:
+        timestamp: {type: integer, description: 'Epoch ms'}
+        interval_seconds: {type: integer}
+        rx_byte-r: {type: integer, description: 'Average receive rate (bytes/s)'}
+        tx_byte-r: {type: integer, description: 'Average transmit rate (bytes/s)'}
+        total_bytes: {type: integer}
+        top_app:
+          type: object
+          properties:
+            application: {type: integer}
+            category: {type: integer}
+            rx_byte-r: {type: integer}
+            tx_byte-r: {type: integer}
+            total_bytes: {type: integer}
+    Dashboard:
+      type: object
+      description: One key per dashboard widget; each is free-form and present only when the widget applies.
+      additionalProperties: true
+      properties:
+        dashboard_meta:
+          type: object
+          properties:
+            start_timestamp: {type: integer}
+            end_timestamp: {type: integer}
+            layout: {type: string}
+            widgets: {type: array, items: {type: string}}
+        system_status: {type: object, additionalProperties: true, description: 'Gateway IP, uptime and WAN groups'}
+        wan: {type: object, additionalProperties: true}
+        wan_activity: {type: object, additionalProperties: true, description: 'Per-WAN history with latency, packet loss, rates and client counts'}
+        wan_history: {type: object, additionalProperties: true}
+        isp_metrics: {type: object, additionalProperties: true}
+        speed_test: {type: object, additionalProperties: true}
+        wifi_activity: {type: object, additionalProperties: true}
+        wifi_tx_retries: {type: object, additionalProperties: true, description: 'APs grouped by TX retry level'}
+        wifi_connectivity: {type: object, additionalProperties: true}
+        radio_activity: {type: object, additionalProperties: true}
+        ap_radio_density: {type: object, additionalProperties: true}
+        wifi_channel_preset_configuration: {type: object, additionalProperties: true}
+        most_active_apps_aps_clients: {type: object, additionalProperties: true}
+        most_common_client_fingerprints: {type: object, additionalProperties: true}
+        upgradable_device_count: {type: object, properties: {device_count: {type: integer}}}
+        degradation_status: {type: object, properties: {safe_mode: {type: boolean}}, description: 'Safe mode means the console has shed load'}
+        critical_traffic_prioritization: {type: object, additionalProperties: true}
+    SystemLogQuery:
+      type: object
+      properties:
+        searchText: {type: string}
+        type: {type: string, description: 'Log view', examples: [GENERAL]}
+        timestampFrom: {type: integer, description: 'Window start (epoch ms); `all` and `filter-data` only'}
+        timestampTo: {type: integer, description: 'Window end (epoch ms); `all` and `filter-data` only'}
+        pageNumber: {type: integer, minimum: 0, description: '`all` only; zero-based'}
+        pageSize: {type: integer, examples: [100], description: '`all` only'}
+        severities:
+          type: array
+          items: {type: string, enum: [LOW, MEDIUM, HIGH, VERY_HIGH]}
+        categories:
+          type: array
+          items: {type: string, enum: [CLIENT_DEVICES, INTERNET_AND_WAN, POWER, AUDIT, SECURITY, UNIFI_DEVICES, SOFTWARE_UPDATES, UNIFI_ETHERNET_PORTS, VPN]}
+        subcategories:
+          type: array
+          items:
+            type: string
+            enum: [MONITORING_GUEST_HOTSPOT, MONITORING_WIFI, MONITORING_WIRED, MONITORING_STATUS, INTERNET_OUTAGE_AND_FAILOVER,
+                   INTERNET_PERFORMANCE, POWER_POE, POWER_REDUNDANCY, POWER_CYCLE, SECURITY_FIREWALL, SECURITY_HONEYPOT,
+                   SECURITY_INTRUSION_PREVENTION, SYSTEM_ADMIN, SYSTEM_DEVICES, SYSTEM_NETWORK, SYSTEM_VPN, SYSTEM_WIFI]
+        events:
+          type: array
+          description: Event types (119 on 11.0.81).
+          items:
+            type: string
+            enum: [ADMIN_ACCESS, AFC_SERVER_NOT_AVAILABLE, APPROACHING_CELLULAR_DATA_LIMIT, AP_CHANGED_CHANNELS, AP_CLIENT_PACKET_LOSS,
+                   AP_DETECTED_RADAR, AP_LOCATION_NOT_MEET_AFC_REQUIREMENT, AP_LOW_PERFORMANCE_MODE, AP_UPDATE_AVAILABLE_TO_SUPPORT_AUTOLINK,
+                   BLOCKED_BY_FIREWALL, BPDU_GUARD_TRIGGERED, BULK_FIRMWARE_UPDATE_AVAILABLE, CELLULAR_DATA_LIMIT_REACHED,
+                   CLIENT_CONNECTED_WIRED, CLIENT_CONNECTED_WIRELESS, CLIENT_DISCONNECTED_WIRED, CLIENT_DISCONNECTED_WIRELESS,
+                   CLIENT_IP_CONFLICT, CLIENT_LINK_FLAP_WIRED, CLIENT_ROAMED, DEVICES_POWERED_BY_USW_MC, DEVICE_ADOPTED,
+                   DEVICE_COMMIT_ERROR, DEVICE_DISCOVERED, DEVICE_FAN_NOT_OPERATING, DEVICE_FAN_OFFLINE, DEVICE_MESHED,
+                   DEVICE_POWERED_BY_USP_RPS, DEVICE_POWER_CYCLED, DEVICE_POWER_SUPPLY_OFFLINE, DEVICE_RECONNECTED,
+                   DEVICE_RECONNECTED_SEVERAL_TIMES, DEVICE_RECONNECTED_WITH_DOWNLINKS, DEVICE_STOP_MESH, DEVICE_UNREACHABLE,
+                   DEVICE_UPS_BATTERY_POWER, DEVICE_UPS_OFFLINE, DEVICE_UPS_OFFLINE_TIME, DEVICE_UPS_POWER_RESTORED,
+                   DHCP_POOL_EXHAUSTED, DOT1X_AUTHENTICATION_FAILED, FIRMWARE_ROLLBACK, FIRMWARE_UPDATED, FIRMWARE_UPDATE_AVAILABLE,
+                   FIRMWARE_UPDATE_DNS_RESOLUTION_FAILED, FIRMWARE_UPDATE_FAILED, GENERATED, HIGH_TRAFFIC, HONEYPOT_HIT_DETECTED,
+                   HOTSPOT_GUEST_AUTHORIZED, HOTSPOT_GUEST_UNAUTHORIZED_BY_ADMIN, IDENTITY_USER_REPORT, ISP_HIGH_LATENCY,
+                   ISP_PACKET_LOSS, LOCATION_CANNOT_BE_DETERMINED, LOG_SWITCH_PORT_LINK_FLAP, LOG_SWITCH_PORT_STP_FLAP,
+                   MAC_TABLE_APPROACHING, MAC_TABLE_FULL, MADE_CHANGES, MBB_SIM_INSERTED, MBB_SIM_REMOVED,
+                   MCLAG_MULTI_CHASSIS_LINK_PORT_NEGOTIATION_FAILED, MULTIPLE_AP_UPDATES_AVAILABLE_TO_SUPPORT_AUTOLINK,
+                   MULTIPLE_DEVICES_DISCOVERED, MULTIPLE_DEVICES_RESTARTED_BY_POWER_STRIP, MULTIPLE_DEVICES_UNREACHABLE,
+                   NEGOTIATED_LOW_UPLINK_PORT_SPEED, NETWORK_FAILED_OVER_TO_BACKUP_LTE, NETWORK_FAILED_OVER_TO_BACKUP_LTE_TEMPORARY,
+                   NETWORK_FAILED_OVER_TO_BACKUP_WAN, NETWORK_FAILED_OVER_TO_BACKUP_WAN_TEMPORARY, NETWORK_LOOP_DETECTED_BY_KEEPALIVE,
+                   NETWORK_LOOP_DETECTED_BY_STP, NETWORK_UPDATED, NETWORK_WAN_FAILED, NETWORK_WAN_FAILED_MULTIPLE_TIMES,
+                   NETWORK_WAN_FAILED_TEMPORARY, NETWORK_WAN_LOAD_BALANCING_DEGRADED, NETWORK_WAN_RESTORED,
+                   NEW_WIFI_CLIENT_CONNECTED, NEW_WIRED_CLIENT_CONNECTED, PAUSED_ENTITY, POE_BUDGET_EXCEEDED,
+                   POE_PORT_BUDGET_EXCEEDED, POLICY_BASED_ROUTING_STARTED, POLICY_BASED_ROUTING_STOPPED, PORT_BROADCAST_STORM,
+                   PORT_DHCP_STORM, PORT_DOS, PORT_DROPPED_TRAFFIC, PORT_LOCK_VIOLATION, PORT_MAC_LOCKING, PORT_MULTICAST_STORM,
+                   PORT_PHY_FAILURE, PORT_POE_FAILURE, PORT_TRANSMISSION_ERRORS, PORT_UNICAST_STORM, RADIUS_SERVER_ISSUE,
+                   REMOVED_ENTITY, RESUMED_ENTITY, ROGUE_AP_DETECTED, ROGUE_DHCP_SERVER_DETECTED, SFP_EEPROM_ERROR,
+                   SFP_RECEIVED_FAULT, SFP_TRANSMISSION_FAULT, SSL_CERTIFICATE_EXPIRY, SSL_INSPECTION_BYPASS,
+                   STACKING_LINK_IN_STACK_DISCONNECTED, STACK_CREATED, STACK_EXTENDED, TELEPORT_CLIENT_CONNECTED,
+                   TELEPORT_CLIENT_DISCONNECTED, THREAT_BLOCKED, THREAT_DETECTED, VPN_CLIENT_CONNECTED, VPN_CLIENT_DISCONNECTED,
+                   VPN_SITE_TO_SITE_DISCONNECTED, WAN_LAN_OVERLAP]
+        clientDeviceMacs: {type: array, items: {type: string}, description: 'Limit to these clients'}
+        adminIds: {type: array, items: {type: string}, description: 'Limit to actions by these admins'}
+    SystemLogEntry:
+      type: object
+      description: |
+        One System Log entry. `title_raw` and `message_raw` are templates: each `{NAME}` is replaced by
+        `parameters.NAME.name`. `target` names the parameter the entry is about (for example `CLIENT`, `WAN_ID`, `DEVICE`).
+      properties:
+        id: {type: string, description: 'UUID for `system-log/all` entries, 24-hex for critical entries. Pass to `getSystemLogEntryCef`.', examples: [7c1e5f2b-3d8a-4e6c-9f1b-2d0a4e3f5a6b, 0123456789abcdef01234567]}
+        timestamp: {type: integer, description: 'Epoch ms'}
+        type: {type: string, examples: [CLIENT_CONNECTION, ISP, DEVICE_CONNECTION, SWITCH_ISSUE]}
+        key: {type: string, description: 'Template key (event plus version suffix)', examples: [ISP_HIGH_LATENCY_2]}
+        event: {type: string, description: 'One of the `SystemLogQuery.events` values', examples: [ISP_HIGH_LATENCY]}
+        category: {type: string, description: 'Not always a filter category: critical device and switch entries use `SYSTEM`.', examples: [INTERNET_AND_WAN, CLIENT_DEVICES, SYSTEM]}
+        subcategory: {type: string, examples: [INTERNET_PERFORMANCE]}
+        severity: {type: string, enum: [LOW, MEDIUM, HIGH, VERY_HIGH]}
+        status: {type: string, examples: [NEW]}
+        show_on_dashboard: {type: boolean}
+        target: {type: string}
+        title_raw: {type: string, examples: ['{WAN_ID} High Latency Detected']}
+        message_raw: {type: string, examples: ['Internet connection {WAN_ID} {ISP_NAME} on port {PORT} is experiencing high latency.']}
+        parameters:
+          type: object
+          description: Values for the template placeholders. Common keys are CLIENT, DEVICE, NETWORK, WLAN, WAN_ID, ISP_NAME, LATENCY.
+          additionalProperties: {$ref: '#/components/schemas/SystemLogParameter'}
+      example:
+        id: 7c1e5f2b-3d8a-4e6c-9f1b-2d0a4e3f5a6b
+        timestamp: 1792083291931
+        type: ISP
+        key: ISP_HIGH_LATENCY_2
+        event: ISP_HIGH_LATENCY
+        category: INTERNET_AND_WAN
+        subcategory: INTERNET_PERFORMANCE
+        severity: MEDIUM
+        status: NEW
+        show_on_dashboard: false
+        target: WAN_ID
+        title_raw: '{WAN_ID} High Latency Detected'
+        message_raw: 'Internet connection {WAN_ID} {ISP_NAME} on port {PORT} is experiencing high latency.'
+        parameters:
+          WAN_ID: {id: WAN, name: WAN1, not_actionable: true}
+          ISP_NAME: {name: Example ISP, enclosed_with_brackets: true, not_actionable: true}
+          PORT: {id: '2', name: '2', not_actionable: true}
+          LATENCY: {name: '34'}
+          WAN_SLA_SERVER: {name: 1.1.1.1}
+          DEVICE: {id: '00:00:5e:00:53:01', ip: 192.168.1.1, model: Gateway Lite, model_name: UXG, name: Gateway, version: 5.1.26}
+    SystemLogParameter:
+      type: object
+      description: A placeholder value. `name` is the display text; the other fields vary by parameter type.
+      additionalProperties: true
+      properties:
+        name: {type: string}
+        id: {type: string, description: 'MAC for devices and clients, ID or key otherwise'}
+        ip: {type: string}
+        model: {type: string}
+        model_name: {type: string}
+        version: {type: string}
+        hostname: {type: string}
+        subnet: {type: string}
+        vlan_id: {type: integer}
+        network_purpose: {type: string}
+        port: {type: string, description: 'Switch port (for example on `UPLINK`)'}
+        url: {type: string, format: uri, description: 'Help article (on `LEARN_MORE`)'}
+        list_values: {type: array, items: {type: string}, description: 'Multi-value parameters, for example `DOWNLINK_MACS`'}
+        device_fingerprint_id: {type: integer}
+        fingerprint_source: {type: integer}
+        not_actionable: {type: boolean, description: 'Display-only (not a link in the UI)'}
+        enclosed_with_brackets: {type: boolean}
+    AlarmRule:
+      type: object
+      properties:
+        id: {type: string}
+        title: {type: string}
+        trigger_categories: {type: array, items: {type: object, additionalProperties: true}}
+        action_categories: {type: array, items: {type: object, additionalProperties: true}}
+        scope:
+          type: object
+          properties:
+            mode: {type: string}
+            data: {type: object, additionalProperties: true}
+        stats: {type: object, properties: {executions_24h: {type: integer}}}
+        author: {type: object, properties: {id: {type: string}, name: {type: string}}}
+        created_at: {type: string, format: date-time}
+    FirewallPolicyUi:
+      type: object
+      description: Controller (UI) view of a zone-based firewall policy. Field names differ from the Integration API.
+      properties:
+        _id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        enabled: {type: boolean}
+        index: {type: integer, description: 'Evaluation order within the zone pair'}
+        action: {type: string, examples: [ALLOW, BLOCK, REJECT]}
+        predefined: {type: boolean, description: 'System-defined policy'}
+        origin_type: {type: [string, 'null'], examples: [custom_firewall_rule]}
+        origin_id: {type: string}
+        ip_version: {type: string, examples: [BOTH, IPV4, IPV6]}
+        protocol: {type: string, examples: [all, tcp, udp, tcp_udp, icmp, icmpv6, igmp]}
+        match_opposite_protocol: {type: boolean}
+        icmp_typename: {type: string}
+        icmp_v6_typename: {type: string}
+        connection_state_type: {type: string, examples: [ALL, RESPOND_ONLY, CUSTOM]}
+        connection_states: {type: array, items: {type: string}}
+        create_allow_respond: {type: boolean, description: 'Auto-allow return traffic'}
+        match_ip_sec: {type: boolean}
+        logging: {type: boolean}
+        report_flow: {type: boolean}
+        schedule: {type: object, additionalProperties: true, properties: {mode: {type: string, examples: [ALWAYS]}}}
+        hits: {type: integer, description: 'Match counter reported by the gateway; 0 suggests an unused policy'}
+        last_hit: {type: [integer, 'null'], description: 'Timestamp of the last match; null if never matched'}
+        source: {$ref: '#/components/schemas/FirewallPolicyUiEndpoint'}
+        destination: {$ref: '#/components/schemas/FirewallPolicyUiEndpoint'}
+    FirewallPolicyUiEndpoint:
+      type: object
+      properties:
+        zone_id: {type: string}
+        matching_target: {type: string, examples: [ANY, NETWORK, IP, CLIENT, IID]}
+        matching_target_type: {type: string}
+        network_ids: {type: array, items: {type: string}}
+        ips: {type: array, items: {type: string}}
+        client_macs: {type: array, items: {type: string}}
+        iid: {type: string}
+        match_mac: {type: boolean}
+        match_opposite_networks: {type: boolean}
+        match_opposite_ips: {type: boolean}
+        match_opposite_iid: {type: boolean}
+        port_matching_type: {type: string, examples: [ANY, SPECIFIC]}
+        port: {type: string}
+        match_opposite_ports: {type: boolean}
+    EnrichedConfiguration:
+      type: object
+      properties:
+        configuration: {type: object, additionalProperties: true, description: 'The underlying networkconf / wlanconf record'}
+        details: {type: object, additionalProperties: true, description: 'For WANs, `service_provider`'}
+        statistics:
+          type: object
+          additionalProperties: true
+          properties:
+            current_client_count: {type: integer}
+            peak_client_count: {type: integer}
+            current_access_point_count: {type: integer}
+            current_satisfaction: {type: integer, minimum: 0, maximum: 100}
+            uptime_percentage: {type: number, description: 'WAN only'}
+            peak_usage: {type: object, additionalProperties: true, description: 'WAN only'}
+
+    # ================================================================ UniFi OS: users and roles
+    UsersEnvelope:
+      type: object
+      description: Envelope used by `/proxy/users/api/v2/*`. `code` 0 / `codeS` `SUCCESS` on success.
+      properties:
+        code: {type: integer, examples: [0]}
+        codeS: {type: string, examples: [SUCCESS]}
+        msg: {type: string}
+    ConsoleRole:
+      type: object
+      properties:
+        unique_id: {type: string, format: uuid}
+        name: {type: string, examples: [Owner, Super Admin, Network read-only]}
+        system_role: {type: boolean}
+        system_key: {type: string, examples: [owner]}
+        level: {type: integer, description: 'Role level (Owner is 1)'}
+        is_private: {type: boolean}
+        create_time: {type: string}
+        update_time: {type: string}
+    ConsoleUser:
+      type: object
+      description: Console (UniFi OS) user. Personal fields omitted here; the API also returns e-mail, phone, avatar and SSO details.
+      properties:
+        unique_id: {type: string, format: uuid}
+        username: {type: string}
+        full_name: {type: string}
+        status: {type: string, examples: [ACTIVE]}
+        only_local_account: {type: boolean, description: 'True for a local account with no UI (cloud) login - best for integrations'}
+        only_ui_account: {type: boolean}
+        create_time: {type: integer}
+        login_time: {type: integer, description: 'Last login (epoch seconds)'}
+        last_activity_time: {type: integer}
+        roles: {type: array, items: {$ref: '#/components/schemas/ConsoleRole'}}
+        permissions:
+          type: object
+          description: Effective permission levels per area, for example `network.management`, `system.management.user`.
+          additionalProperties: {type: array, items: {type: string, examples: [admin, readonly]}}
+        api_keys: {type: array, items: {type: object, additionalProperties: true}}
 
     # ================================================================ Cloud (Site Manager)
     CloudEnvelope:
